@@ -24,7 +24,7 @@ A lightweight bootstrap mechanism (ConfigSync) glues the two lanes together by i
 │  │  ──────────────────────────────────────────────────────────────────────────  │  │
 │  │  GCP projects & folders    VPCs, subnets, Cloud NAT    GKE clusters          │  │
 │  │  DNS zones                 Platform-level IAM          Secret Manager        │  │
-│  │  Artifact Registry                                                           │  │
+│  │  Firestore databases       Cross-project IAM            Artifact Registry    │  │
 │  │                                                                              │  │
 │  │  Applied via automation or manual tf apply                                   │  │
 │  └──────────────────────────────────┬───────────────────────────────────────────┘  │
@@ -67,7 +67,7 @@ Multiple tools can provision GCP resources (Terraform, Config Connector). Withou
 
 ### Constraints
 
-- GKE clusters are private -- Terraform cannot access the Kubernetes API directly. It interacts only with GCP APIs (see [GKE Fleet Management](./gke-fleet-management.md))
+- GKE clusters are private -- Terraform cannot access the Kubernetes API directly. It interacts only with GCP APIs (see [GKE Fleet Management](../infrastructure/gke-fleet-management.md))
 - ArgoCD sync waves handle ordering within Lane 2 (see [ArgoCD Sync Wave Standardization](./argocd-sync-wave-standardization.md))
 - Automation is used to apply Terraform infrastructure as a general rule, with exceptions for specific bootstrap scenarios
 
@@ -104,7 +104,7 @@ Config Connector resources are Kubernetes manifests -- the engineer's workflow i
 
 - Terraform modules in `gcp-hcp-infra/terraform/` are scoped to foundation infrastructure with no Kubernetes resource management
 - ArgoCD sync wave standardization already distinguishes component types within Lane 2 ([ArgoCD Sync Wave Standardization](./argocd-sync-wave-standardization.md))
-- The bootstrap architecture explicitly separates Terraform from cluster-internal resources via ConfigSync and Secret Manager ([GKE Fleet Management](./gke-fleet-management.md))
+- The bootstrap architecture explicitly separates Terraform from cluster-internal resources via ConfigSync and Secret Manager ([GKE Fleet Management](../infrastructure/gke-fleet-management.md))
 
 ## Consequences
 
@@ -150,7 +150,7 @@ Terraform manages GCP resources that form the platform foundation -- things that
 - DNS zones
 - Secret Manager secrets for platform configuration (cluster metadata, git credentials, infrastructure tool credentials)
 - Platform-level IAM: project-level role bindings, cross-project bindings, service accounts for infrastructure tools
-- Cross-cluster communication infrastructure (e.g., Maestro PubSub topics, subscriptions, and associated IAM between region and MC)
+- Cross-cluster transport infrastructure (e.g., Firestore `specs`/`status` databases and associated cross-project IAM between region controllers and management-cluster agents)
 - Artifact Registry repositories
 
 **What does NOT belong here:**
@@ -250,7 +250,7 @@ The key question for GCP resources is: **is this foundational infrastructure?**
 | PubSub topic for an app | 2 | App-scoped, deployed as Config Connector CR |
 | App Workload Identity SA | 2 | App-scoped IAM via Config Connector |
 | App-specific firewall rule | 2 | App-scoped, deployed as Config Connector CR |
-| Maestro PubSub (region ↔ MC) | 1 | Cross-cluster communication infrastructure, created by MC Terraform |
+| Firestore transport (`specs`/`status`) | 1 | Cross-cluster transport databases and IAM, created by management-cluster Terraform |
 | Cross-cluster firewall rule | 1 | Platform networking, must exist before cluster |
 | Shared PubSub infrastructure | 2 | Non-foundational, deployed as Config Connector stack (wave -5) |
 | API Gateway, certificates | 2 | Application-level, deployed via Config Connector |
