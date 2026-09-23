@@ -1,34 +1,43 @@
-# Use Firestore as a Database-Backed Transport to Replace Maestro
+# Use Firestore as the Database-Backed Transport for Gecko
 
 ***Scope***: GCP-HCP
 
 **Date**: 2026-06-05
+
+**Status**: Implemented
 **Supersedes**: [RC-MC Transport Layer (Maestro)](rc-mc-transport-layer.md)
-**Study**: [`studies/datastore-transport.md`](../studies/datastore-transport.md)
-**Implementation Plan**: [`implementation-plans/gcp-813-datastore-transport.md`](../implementation-plans/gcp-813-datastore-transport.md)
+**Study**: [`studies/datastore-transport.md`](../../studies/datastore-transport.md)
+**Implementation Plan**: [`implementation-plans/gcp-813-datastore-transport.md`](../../implementation-plans/gcp-813-datastore-transport.md)
 
 ## Decision
 
-Replace Maestro with Cloud Firestore (Native mode, regional) as the transport layer between CLM on region clusters and management clusters. Each management cluster hosts two Firestore databases in its GCP project (`specs` and `status`) for IAM-enforced directional isolation. CLM accesses MC databases cross-project via Workload Identity. CLM is the source of truth for desired state and can fully resync specs to a new/rebuilt MC database. Document schema is aligned with ARO kube-applier desire types (`Spec.TargetItem`, `Spec.KubeContent`, `Status.Conditions`).
+Gecko's HostedCluster and NodePool controllers use Cloud Firestore (Native mode, regional) as the transport layer between region clusters and management clusters. Each management-cluster project hosts two Firestore databases, `specs` and `status`, for IAM-enforced directional isolation. Gecko writes desire documents to `specs`; `kube-applier-gcp` consumes them with Firestore snapshot listeners, applies them to the management cluster, and writes feedback to `status`. Gecko reads that feedback during reconciliation. Both sides authenticate through direct GKE Workload Identity Federation principals, with no intermediary service account or static credential. Document types are aligned with the kube-applier-gcp APIs (`Spec.TargetItem`, `Spec.KubeContent`, `Status.Conditions`).
+
+The deployed flow is:
+
+1. Gecko HC and NodePool controllers write Apply, Read, and Delete desires to the MC's `specs` database.
+2. kube-applier-gcp watches the `specs` database with persistent Firestore snapshot listeners and applies or observes the target resources.
+3. kube-applier-gcp writes operation conditions and observed resource content to the MC's `status` database.
+4. Gecko reads status documents on reconciliation and requeues while asynchronous operations remain pending.
 
 ## Context
 
-- **Problem Statement**: Maestro introduces operational complexity as an intermediary between CLM and management clusters. Other teams (ARO-HCP on Azure) have replaced Maestro with a simpler database-backed transport using CosmosDB, achieving the same spec delivery and status feedback with fewer moving parts. We need an equivalent on GCP.
+- **Problem Statement**: The superseded Maestro design introduced an intermediary between region controllers and management clusters. Other teams (ARO-HCP on Azure) demonstrated a simpler database-backed transport using CosmosDB, achieving the same spec delivery and status feedback with fewer moving parts. Gecko uses the equivalent Firestore design on GCP.
 - **Constraints**:
   - Per-MC access segregation must be IAM-enforced, not application-enforced only
   - All data must remain within a single GCP region
   - Region clusters and management clusters run in separate GCP projects — cross-project IAM via Workload Identity Federation is required
   - **No static credentials**: no service account keys, database passwords, connection strings with embedded secrets, or API keys may be created or distributed. All authentication must flow through GKE Workload Identity → GCP IAM. This is a hard requirement, not a preference.
-  - The solution should be compatible with the ARO kube-applier's document-store interaction pattern to enable interface reuse
+  - The solution should be compatible with the kube-applier-gcp document-store interaction pattern and APIs
 - **Assumptions**:
   - The number of management clusters per region will be in the low hundreds (scaling to ~100-200 in the medium term)
   - Individual K8s resource specs (HostedCluster, NodePool, etc.) are under 1 MiB (Firestore document size limit)
-  - CLM is the source of truth for desired state — the Firestore database is a transport layer, not a primary store. CLM's adapter regular sync model can fully resync all specs to an empty database on startup.
+  - The Platform API's Cluster and NodePool resources are the source of truth for desired state. Gecko reconciliation repopulates Firestore specs in an empty or rebuilt database.
   - Each MC runs in its own GCP project
 
 ## Alternatives Considered
 
-1. **Cloud Firestore (per-MC databases)**: Two Firestore databases per management cluster (`specs` + `status`), enabling IAM-enforced directional isolation. Native real-time listeners for change notification. Serverless, no infrastructure to manage. Document schema aligned with ARO kube-applier desire types.
+1. **Cloud Firestore (per-MC databases)**: Two Firestore databases per management cluster (`specs` + `status`), enabling IAM-enforced directional isolation. Native real-time listeners provide change notification to kube-applier-gcp. Serverless, no infrastructure to manage. Document schema aligned with kube-applier-gcp desire types.
 
 2. **Cloud Spanner (single database with FGAC + views)**: Fine-grained access control with definer's-rights views for read isolation. Change streams for near-real-time notification. However, write isolation is application-enforced only (views are read-only), 100 database roles per database ceiling, and not a document store (breaks ARO compatibility). Higher cost ($200-600/month vs. $10-50/month).
 
@@ -42,16 +51,16 @@ Replace Maestro with Cloud Firestore (Native mode, regional) as the transport la
 
 ## Decision Rationale
 
-* **Justification**: Firestore per-MC database provides the best combination of IAM-enforced isolation, operational simplicity, cost efficiency, and ARO interface compatibility. It is the only option that satisfies all hard requirements while also being document-store-native — enabling shared Go interfaces with the ARO kube-applier.
+* **Justification**: Firestore per-MC databases provide the best combination of IAM-enforced isolation, operational simplicity, cost efficiency, and kube-applier-gcp compatibility. It is the only option that satisfies all hard requirements while also being document-store-native.
 
 * **Evidence**:
   - Firestore's multi-database feature (GA since 2023) maps directly to CosmosDB's per-MC container model used by ARO-HCP
-  - Hosting two Firestore databases (`specs`, `status`) in each MC's own project ties DB lifecycle to MC lifecycle and keeps MC agent access local (no cross-project IAM needed for the agent)
+  - Hosting two Firestore databases (`specs`, `status`) in each MC's own project ties DB lifecycle to MC lifecycle and keeps kube-applier-gcp access local (no cross-project IAM needed for the agent)
   - IAM grants differentiated roles per database (`datastore.user` for write, `datastore.viewer` for read) — directional isolation is structurally enforced, not application-level
   - Native real-time listeners eliminate the need for polling infrastructure or CDC pipelines
   - Authentication is fully credential-free: Go SDK uses Application Default Credentials via GKE Workload Identity — no service account keys, database passwords, Auth Proxy sidecars, or secrets to create, rotate, or distribute
-  - Cost is 4-60x lower than alternatives ($10-50/month vs. $100-1400/month)
-  - The ARO kube-applier's `KubeApplierDBClient` interface stack (typed CRUD, GlobalLister, Fetcher/Replacer) maps naturally to Firestore operations with low bridging effort
+  - Compared with the Cloud Spanner estimate, Firestore is approximately 4-60x less expensive depending on usage ($10-50/month vs. $200-600/month)
+  - kube-applier-gcp's typed CRUD, lister, and snapshot-listener interfaces map directly to Firestore operations
 
 * **Comparison**:
   - **vs. Spanner**: Spanner provides stronger read isolation via FGAC views but cannot enforce write isolation at the row level (views are read-only). The 100-role-per-database ceiling and node-based pricing ($200-600/month) make it less suitable. Not a document store.
@@ -63,14 +72,14 @@ Replace Maestro with Cloud Firestore (Native mode, regional) as the transport la
 ### Positive
 
 * IAM-enforced per-MC isolation with zero application-layer trust assumptions
-* DB pair lifecycle naturally tied to MC lifecycle — created during MC provisioning, deleted on MC teardown, no orphaned databases
+* DB pair lifecycle is tied to MC provisioning; teardown behavior follows the environment's Firestore delete-protection setting
 * Native real-time listeners eliminate polling latency and infrastructure
 * Lowest operational burden — fully managed, serverless, no proxies, no connection pooling, no schema migrations
 * Lowest cost of all evaluated options ($10-50/month)
-* Document schema aligned with ARO kube-applier desire types — shared Go interfaces and potential code reuse across Azure and GCP
-* Per-MC database pair provides native per-tenant backup and restore
-* Disaster recovery is inherent: CLM is the source of truth for desired state. On MC project rebuild, new Firestore databases are created and CLM's adapter regular sync model resyncs all specs automatically — no manual data recovery needed. Status data is transient and will be re-reported by the agent once it starts.
-* Automatic recovery after regional outage with no data loss
+* Document schema aligned with the kube-applier-gcp desire types and integration contract
+* Per-MC database pair provides independent lifecycle and recovery boundaries
+* Recovery after an MC project or database rebuild relies on the Platform API state, Terraform database provisioning, and Gecko reconciliation repopulating specs. Status data is transient and will be re-reported by kube-applier-gcp; backup and point-in-time recovery are not configured.
+* Regional Firestore provides managed service recovery for zonal failures; recovery objectives for region loss or document deletion are not defined by this design because backups and point-in-time recovery are not configured
 
 ### Negative
 
@@ -84,16 +93,16 @@ Replace Maestro with Cloud Firestore (Native mode, regional) as the transport la
 ### Reliability:
 
 * **Scalability**: Firestore scales automatically with no provisioned capacity. Each MC has two independent databases in its own GCP project (2 DBs per project, well under the 100 DBs/project limit).
-* **Observability**: Firestore provides built-in metrics in Cloud Monitoring (read/write counts, latency, error rates) per database. Custom metrics can be added in the adapter and agent for per-resource-type tracking.
-* **Resiliency**: 99.99% SLA for regional Firestore. Transparent zone failover within the region. Data survives regional outage on Google's storage infrastructure and is automatically available when the region recovers. In case of MC project deletion/rebuild, CLM resyncs all specs via the adapter's regular sync model — no manual data recovery needed.
+* **Observability**: Firestore provides built-in metrics in Cloud Monitoring (read/write counts, latency, error rates) per database. Custom metrics can be added in Gecko and kube-applier-gcp for per-resource-type tracking.
+* **Resiliency**: 99.99% SLA for regional Firestore with transparent zone failover. Recovery after MC project or database recreation relies on Terraform and Gecko reconciliation; this design does not claim a region-loss or document-deletion recovery objective.
 
 ### Security:
 
-* Each MC agent's Workload Identity GSA is granted `roles/datastore.viewer` on `specs` database (read only) and `roles/datastore.user` on `status` database (read/write) — lateral movement between MCs is prevented by IAM
-* CLM adapter's GSA is granted cross-project `roles/datastore.user` on `specs` database and `roles/datastore.viewer` on `status` database per MC — directional isolation is IAM-enforced
+* The kube-applier-gcp pod's direct WIF principal is granted `roles/datastore.viewer` on `specs` (read only) and `roles/datastore.user` on `status` (read/write) — lateral movement between MCs is prevented by IAM.
+* Gecko HC and NodePool direct WIF principals are granted cross-project `roles/datastore.user` on `specs` and `roles/datastore.viewer` on `status` for each MC — directional isolation is IAM-enforced.
 * Cross-project IAM bindings are standard GCP IAM — no VPC peering, no network-level trust required
 * Firestore data is encrypted at rest by default (Google-managed keys); CMEK is available if required
-* **Spec/status directional isolation**: IAM-enforced via two databases per MC. The adapter cannot write status and the agent cannot write specs. A single-database simplification is possible but reduces directional isolation to application-level enforcement only
+* **Spec/status directional isolation**: IAM-enforced via two databases per MC. Gecko cannot write status and kube-applier-gcp cannot write specs. A single-database simplification is possible but reduces directional isolation to application-level enforcement only
 
 ### Performance:
 
@@ -110,8 +119,8 @@ Replace Maestro with Cloud Firestore (Native mode, regional) as the transport la
 
 ### Operability:
 
-* Zero credential management — no service account keys, database passwords, or secrets to create, rotate, or distribute. Authentication flows entirely through GKE Workload Identity → IAM → Firestore Go SDK (Application Default Credentials)
+* Zero credential management — no service account keys, database passwords, or secrets to create, rotate, or distribute. Authentication flows entirely through GKE Workload Identity → IAM → Firestore Go SDK (Application Default Credentials) for both Gecko and kube-applier-gcp.
 * No proxy sidecars, no connection pools, no node sizing, no version upgrades to manage
 * Database lifecycle (create/delete per MC) is a single API call, scriptable in provisioning automation
-* Backup and restore are native per-database operations
+* Recovery is scriptable through Terraform reconciliation and Gecko spec repopulation; this design does not configure Firestore backups or point-in-time recovery
 * Go SDK with Workload Identity ADC — no credential management beyond IAM bindings
