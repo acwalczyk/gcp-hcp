@@ -12,7 +12,7 @@ The initial implementation will not depend on ALM or another external flag-manag
 
 ## Context
 
-- **Problem Statement**: Gecko needs to roll out behavior changes independently by environment, including changes such as Cedar authorization enforcement, while retaining the existing GKE, Helm, ArgoCD, and GitOps promotion model.
+- **Problem Statement**: Gecko needs to roll out behavior changes independently by environment, including changes such as Cedar authorization enforcement, while retaining the existing GKE, Helm, ArgoCD, and GitOps promotion model. Cedar is the in-process policy engine used to authorize Gecko's public API requests; its design is documented in the [Cedar-based authorization decision](../identity/cedar-public-api-authorization.md).
 - **Constraints**: ArgoCD remains the deployment authority. Initial flags are environment-scoped rather than tenant- or region-scoped. The initial solution must work in every Gecko deployment region without a new regional service dependency. Feature definitions must be reviewable and promotable through Git.
 - **Assumptions**: Initial flag changes can follow Git promotion latency. Flag definitions are non-secret. ALM's Preview/Pre-GA status and regional availability do not justify making it an initial dependency. A future requirement for out-of-band runtime changes, tenant targeting, or managed gradual flag rollouts may justify adding ALM or another provider.
 
@@ -52,7 +52,7 @@ The initial implementation will not depend on ALM or another external flag-manag
 
 * **Scalability**: Flag evaluation is in-process and does not add a request-time service call. Each process maintains its own local flag state.
 * **Observability**: Record the flag configuration revision/commit, provider state, reload failures, evaluation errors, default-value use, flag key, and variant. Do not record sensitive evaluation context by default.
-* **Resiliency**: A missing or invalid file must return the code-supplied default and raise an alert. ConfigMap updates may take time to reach mounted files; do not promise immediate propagation. Do not use `subPath` mounts when live file refresh is required. Use a deliberate Deployment rollout when restart-time activation is preferred.
+* **Resiliency**: A missing or invalid file must return the code-supplied default and raise an alert. ConfigMap updates may take time to reach mounted files; do not promise immediate propagation. Do not use `subPath` mounts when live file refresh is required, because ConfigMap files mounted through `subPath` do not receive later ConfigMap updates. Use a deliberate Deployment rollout when restart-time activation is preferred.
 
 ### Security:
 
@@ -74,3 +74,34 @@ The initial implementation will not depend on ALM or another external flag-manag
 * ArgoCD deploys the ConfigMap and application provider configuration. GitOps promoter gates and promotes changes; it does not provide flag evaluation.
 * Provider selection is deployment configuration, for example `file`, `alm`, or `off`. ALM can later be enabled by changing provider configuration and migrating definitions, without changing application evaluation call sites.
 * Each flag requires an owner, a documented default, an intended scope, and an expiry/cleanup plan.
+
+#### Flag definition format
+
+The initial source file uses flagd's native JSON definitions schema, not a separate OpenFeature management manifest. OpenFeature defines the evaluation API; flagd defines the local source format ([flagd flag definitions](https://flagd.dev/reference/flag-definitions/)). For example:
+
+```json
+{
+  "$schema": "https://flagd.dev/schema/v0/flags.json",
+  "flags": {
+    "gecko.public-api.authorization.enabled": {
+      "state": "ENABLED",
+      "variants": {
+        "enabled": true,
+        "disabled": false
+      },
+      "defaultVariant": "enabled",
+      "metadata": {
+        "owner": "gecko-platform-api",
+        "scope": "environment",
+        "expires": "2027-01-31"
+      }
+    }
+  }
+}
+```
+
+`owner`, `scope`, and `expires` are Gecko governance metadata and must be validated in CI; flagd does not interpret them. `defaultVariant` is the provider-evaluated default.
+
+#### Testing
+
+Unit tests should use OpenFeature's in-memory test provider to set deterministic variants and exercise enabled, disabled, and default/error behavior. The file provider is reserved for provider/configuration integration tests and Helm rendering tests.
