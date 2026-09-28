@@ -57,8 +57,6 @@ The initial implementation will not depend on ALM or another external flag-manag
 ### Security:
 
 * ConfigMaps contain only non-secret flag definitions. Credentials, tokens, signing material, and sensitive tenant data remain governed by the [secret-management strategy](https://github.com/openshift-online/gcp-hcp/blob/main/design-decisions/identity/secret-management-strategy.md).
-* Feature flags are not an authorization system. Cedar and kube-apiserver RBAC remain authoritative. A missing, malformed, or unavailable flag must never grant access.
-* Security-sensitive behavior, such as authorization enforcement, requires an explicit mode and reviewed environment configuration. It must not silently fail open because the flag provider is unavailable. The Cedar decision remains authoritative for public API authorization ([Cedar public API authorization](https://github.com/openshift-online/gcp-hcp/blob/main/design-decisions/identity/cedar-public-api-authorization.md)).
 
 ### Performance:
 
