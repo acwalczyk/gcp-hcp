@@ -6,7 +6,15 @@ Migrate infrastructure automation from self-hosted Atlantis to HCP Terraform Clo
 
 Integration environment first, then stage. Production does not have Atlantis today, so TFC will be the first automation there.
 
-**Status (2026-09-01)**: Stories 1–5 are complete for integration — `terraform/atlantis-integration.yaml` no longer lists `global`, `region`, or `management-cluster` projects, all three run on TFC with `auto_apply = true` (validated in [GCP-951](https://redhat.atlassian.net/browse/GCP-951), now Closed). Region/MC onboarding automation (Story 6 script work) shipped under [GCP-535](https://redhat.atlassian.net/browse/GCP-535). All post-epic Atlantis integration projects have also migrated: `hypershift-ci` and `platform-ci` to `gcp-hcp-ci` via [GCP-1093](https://redhat.atlassian.net/browse/GCP-1093) (2026-08-21); `pagerduty` to the new `gcp-hcp-tooling` TFC project via [GCP-1094](https://redhat.atlassian.net/browse/GCP-1094) (2026-08-24); and `service` via [GCP-1092](https://redhat.atlassian.net/browse/GCP-1092) (now Closed) — **not** into a dedicated `gcp-hcp-service` project as originally planned, but as a workspace inside the existing `gcp-hcp-integration` TFC project (reusing `gcp-hcp-int-tfc-access`; see [Atlantis Project Migrations](#atlantis-project-migrations-post-epic)). `terraform/atlantis-integration.yaml` now lists no projects — **no Atlantis integration projects remain**. Separately, `commons` and `commons-dev` — never on Atlantis, previously SRE-manual-applied — are now fully TFC-native in a dedicated `gcp-hcp-commons` TFC project with `auto_apply = true` via [GCP-1111](https://redhat.atlassian.net/browse/GCP-1111) (see [Commons Migration](#commons--commons-dev-migration-to-tfc-gcp-1111--complete)). Also remaining: Story 6 doc finalization ([GCP-952](https://redhat.atlassian.net/browse/GCP-952)), Story 7/8 stage and production rollout ([GCP-953](https://redhat.atlassian.net/browse/GCP-953)), Story 9 decommission ([GCP-954](https://redhat.atlassian.net/browse/GCP-954)), and migrating the org-level Terraform config to TFC ([GCP-1112](https://redhat.atlassian.net/browse/GCP-1112), New — gated on a security review; see [Remaining Scope](#remaining-scope-org-level-terraform-config-gcp-1112--not-started)).
+**Status (2026-09-29)**: The migration is complete for the long-lived workloads that existed during the Atlantis era. Integration and stage workloads now run through HCP Terraform, and the Atlantis runtime has been removed. The final closure evidence is recorded in [GCP-954](https://redhat.atlassian.net/browse/GCP-954), which is Closed.
+
+- **Integration and stage**: `global`, `region`, `management-cluster`, and `service` are TFC-managed in both environments. Stage completed as a brownfield cutover under [GCP-953](https://redhat.atlassian.net/browse/GCP-953), with state seeded, clean plans validated, and `auto_apply` enabled for all four workload types.
+- **Post-epic workloads**: `hypershift-ci` and `platform-ci` moved to `gcp-hcp-ci` ([GCP-1093](https://redhat.atlassian.net/browse/GCP-1093)); `pagerduty` moved to `gcp-hcp-tooling` ([GCP-1094](https://redhat.atlassian.net/browse/GCP-1094)); and `service` is a workspace in `gcp-hcp-integration`, not a dedicated TFC project ([GCP-1092](https://redhat.atlassian.net/browse/GCP-1092)).
+- **Commons and org**: `commons` and `commons-dev` are TFC-native in `gcp-hcp-commons` ([GCP-1111](https://redhat.atlassian.net/browse/GCP-1111)). Org configuration now uses HCP Terraform for state and locking, but remains a human-operated, local-execution workflow with no automated cloud identity ([GCP-1112](https://redhat.atlassian.net/browse/GCP-1112)).
+- **Delivery controls**: GitOps Promoter environment-branch tracking, native HCP Terraform plans, and the trusted Prow fork-PR plan path are in place. MintMaker consumes provider-neutral Terraform Cloud check evidence rather than Atlantis commands. See [Post-cutover delivery controls](#post-cutover-delivery-controls).
+- **Production**: the production access foundation exists, but production workload workspaces and workload resources were deliberately not created. Do not treat [GCP-1144](https://redhat.atlassian.net/browse/GCP-1144)'s Closed status as completion of the deferred production workload rollout; see [Story 8](#story-8-production-rollout---foundation-complete-workload-rollout-deferred-gcp-1144).
+
+The remaining post-migration backlog is intentional: [GCP-945](https://redhat.atlassian.net/browse/GCP-945) evaluates policy-as-code for conditional apply approval, [GCP-1051](https://redhat.atlassian.net/browse/GCP-1051) centralizes the API-enablement catalog, and [GCP-1131](https://redhat.atlassian.net/browse/GCP-1131) decouples the ephemeral e2e template from Integration global-state dependencies. None restores or requires Atlantis.
 
 **Epic**: [GCP-532](https://redhat.atlassian.net/browse/GCP-532) - Terraform Cloud Evaluation & Plan
 
@@ -328,7 +336,7 @@ Validate that TFC can manage the same infrastructure as Atlantis with the same o
 
 ---
 
-## Story 6: Scripts and Tooling — 🟡 Scripts done, docs pending ([GCP-952](https://redhat.atlassian.net/browse/GCP-952))
+## Story 6: Scripts and Tooling — ✅ Complete ([GCP-952](https://redhat.atlassian.net/browse/GCP-952))
 
 ### Summary
 
@@ -342,9 +350,8 @@ Extend automation tooling for TFC workspace generation and update design docs.
   - Add workspace entries to `hcp-terraform/gcp-hcp-{env}/main.tf` when creating new regions/MCs
   - Add plan/apply SA cross-project IAM to `tfc.tf` files in region/MC modules
   - Same gate: `environment in ['integration', 'stage', 'production'] and sector != 'e2e'`
-- [ ] Update design docs in `gcp-hcp`:
-  - `design-decisions/automation/hcp-terraform-workload-identity-federation.md` — mark as implemented
-  - Close experiment cleanup checklist items
+- [x] Reconcile the implementation plan with the delivered migration, rollout, and decommission evidence (this update).
+- [x] Retain the WIF design decision and experiment as the durable rationale for the implemented access-project pattern.
 
 ### Acceptance Criteria
 
@@ -353,24 +360,30 @@ Extend automation tooling for TFC workspace generation and update design docs.
 
 ---
 
-## Story 7: Repeat for Stage — 🔲 Not started ([GCP-953](https://redhat.atlassian.net/browse/GCP-953))
+## Story 7: Repeat for Stage — ✅ Complete ([GCP-953](https://redhat.atlassian.net/browse/GCP-953))
 
-Same as Stories 1–5 for the stage environment:
+Stage was a brownfield cutover, not a greenfield deployment. The access project `gcp-hcp-stg-tfc-access` and `gcp-hcp-stage` TFC project were created first, then the workload state was seeded and validated before enabling automatic apply.
 
-- Target access project: `gcp-hcp-stg-tfc-access`
-- Target projects: `gcp-hcp-stg-global`, `stg-reg-*`, `stg-mgt-*`
-- New workspace definitions: `hcp-terraform/gcp-hcp-stg/`
-- TFC project: `gcp-hcp-stage`
+| Workload | TFC workspace | Cutover evidence |
+|---|---|---|
+| Global | `gcp-hcp-global-staging` | [#1609](https://github.com/openshift-online/gcp-hcp-infra/pull/1609) |
+| Region | `gcp-hcp-region-stg-main-us-west1` | [#1614](https://github.com/openshift-online/gcp-hcp-infra/pull/1614) |
+| Management cluster | `gcp-hcp-mc-stg-main-us-west1-zkpf` | [#1619](https://github.com/openshift-online/gcp-hcp-infra/pull/1619) |
+| Service | `gcp-hcp-service-staging` | [#1624](https://github.com/openshift-online/gcp-hcp-infra/pull/1624) |
+
+Workspace definitions landed in [#1590](https://github.com/openshift-online/gcp-hcp-infra/pull/1590). The stage configuration was removed from Atlantis as each workload cut over ([#1601](https://github.com/openshift-online/gcp-hcp-infra/pull/1601), [#1611](https://github.com/openshift-online/gcp-hcp-infra/pull/1611), [#1616](https://github.com/openshift-online/gcp-hcp-infra/pull/1616), and [#1621](https://github.com/openshift-online/gcp-hcp-infra/pull/1621)). [#1625](https://github.com/openshift-online/gcp-hcp-infra/pull/1625) enabled `auto_apply` after validation. `terraform/atlantis-stage.yaml` then reached the empty-project, autodiscovery-disabled end state.
 
 ---
 
-## Story 8: Production Rollout — 🔲 Not started ([GCP-953](https://redhat.atlassian.net/browse/GCP-953))
+## Story 8: Production Rollout — 🟡 Foundation complete, workload rollout deferred ([GCP-1144](https://redhat.atlassian.net/browse/GCP-1144))
 
 ### Summary
 
-Deploy TFC to production. Production does not have Atlantis today, so TFC will be the first automation. Same Stories 1–5 pattern, but no Atlantis cutover or parallel-running concern.
+Production does not have Atlantis, so HCP Terraform will be the first automation for production workloads. The access foundation is complete: [#1829](https://github.com/openshift-online/gcp-hcp-infra/pull/1829) created the dormant production meta configuration, `gcp-hcp-prd-tfc-access`, its WIF pool/provider, plan/apply service accounts, and the production credential variable set. The access workspace was manually applied with local execution and HCP Terraform state/locking.
 
-**Depends on**: Stories 5 and 7 (integration and stage validated)
+No production workload workspace, workload resource, workload IAM grant, or workload apply was created as part of that foundation. The state-provenance decision, rollback procedure, first-plan review, and workload rollout remain deferred. The ticket was closed after the foundation, but its completion comment explicitly records these limits.
+
+**Depends on**: Stories 5 and 7 (integration and stage validated), plus an explicit production workload state-provenance and rollback decision.
 
 - Target access project: `gcp-hcp-prd-tfc-access`
 - Target projects: `gcp-hcp-prd-global`, `prd-reg-*`, `prd-mgt-*`
@@ -386,30 +399,48 @@ Production introduces additional considerations not present in integration/stage
 
 ---
 
-## Story 9: Cutover and Decommission Atlantis — 🔲 Not started ([GCP-954](https://redhat.atlassian.net/browse/GCP-954))
+## Story 9: Cutover and Decommission Atlantis — ✅ Runtime decommission complete ([GCP-954](https://redhat.atlassian.net/browse/GCP-954))
 
 ### Summary
 
-Disable Atlantis and remove its infrastructure after TFC is validated in integration, stage, and production.
+The GitHub App was uninstalled, the ArgoCD application and Helm deployment were removed, Atlantis configuration was retired, and all active Atlantis IAM and service-account resources were removed after their TFC replacements were validated. The work was intentionally split into small, applyable changes to avoid a broad IAM destroy.
 
 ### Tasks
 
-- [ ] Disable Atlantis autoplan (ArgoCD sync disabled or webhook removed) for workspaces that TFC manages
-- [ ] Validate TFC handles all PRs for ~1 week with no Atlantis fallback
-- [ ] Remove Atlantis ArgoCD application (`argocd/config/global/atlantis/`)
-- [ ] Remove Atlantis Helm chart (`helm/charts/atlantis-stack/`)
-- [ ] Remove Atlantis SA and IAM bindings (`atlantis.tf` files in global/region/MC/commons modules)
-- [ ] Remove `atlantis-{env}.yaml` files
-- [ ] Remove all Atlantis required status checks from Prow config in [`openshift/release`](https://github.com/openshift/release/blob/main/core-services/prow/02_config/openshift-online/gcp-hcp-infra/_prowconfig.yaml) (per-environment checks should already be removed during Story 5/7/8 cutover; verify none remain)
-- [ ] Update mintmaker agent (`agent/mintmaker/tools/atlantis.py` → TFC equivalent)
-- [ ] Remove `enable_tfc` variable gates — TFC IAM becomes the only IAM
+- [x] Uninstall the Atlantis GitHub App ([GCP-1212](https://redhat.atlassian.net/browse/GCP-1212)).
+- [x] Remove the ArgoCD application and regenerate the rendered configuration ([#1891](https://github.com/openshift-online/gcp-hcp-infra/pull/1891)).
+- [x] Remove static Atlantis configuration and introduce narrowly scoped workspace retirement gates ([#1919](https://github.com/openshift-online/gcp-hcp-infra/pull/1919), [#1928](https://github.com/openshift-online/gcp-hcp-infra/pull/1928)).
+- [x] Freeze, retire, validate, and restore automatic apply for each TFC workspace group. The IAM retirement sequence covered Integration region and management-cluster ([#1930](https://github.com/openshift-online/gcp-hcp-infra/pull/1930), [#1933](https://github.com/openshift-online/gcp-hcp-infra/pull/1933)), service ([#1935](https://github.com/openshift-online/gcp-hcp-infra/pull/1935)), stage region and management-cluster ([#1945](https://github.com/openshift-online/gcp-hcp-infra/pull/1945), [#1957](https://github.com/openshift-online/gcp-hcp-infra/pull/1957)), HyperShift CI and Platform CI ([#1966](https://github.com/openshift-online/gcp-hcp-infra/pull/1966), [#1967](https://github.com/openshift-online/gcp-hcp-infra/pull/1967)), Commons ([#1977](https://github.com/openshift-online/gcp-hcp-infra/pull/1977)), and global ([#1992](https://github.com/openshift-online/gcp-hcp-infra/pull/1992)).
+- [x] Restore validated automatic apply after the controlled cutovers ([#2002](https://github.com/openshift-online/gcp-hcp-infra/pull/2002)).
+- [x] Replace MintMaker's Atlantis-specific check handling with provider-neutral Terraform Cloud plan evidence ([#1836](https://github.com/openshift-online/gcp-hcp-infra/pull/1836)).
+- [x] Remove the last managed Commons-dev Atlantis service account. [#2044](https://github.com/openshift-online/gcp-hcp-infra/pull/2044) removed it from configuration; [#2045](https://github.com/openshift-online/gcp-hcp-infra/pull/2045) supplied the narrowly scoped OPA approval. The HCP Terraform apply reported `0 added, 0 changed, 1 destroyed` for `google_service_account.atlantis`.
 
 ### Acceptance Criteria
 
-- [ ] No Atlantis pods running in any environment
-- [ ] All `atlantis.tf` and `atlantis-iam.tf` files removed
-- [ ] No Atlantis-related Prow required status checks remain in `openshift/release`
-- [ ] All infrastructure changes flow through TFC
+- [x] No active Atlantis pods, application, GitHub App, or managed service account remains.
+- [x] Active Atlantis IAM has been removed after each TFC replacement was validated.
+- [x] TFC and the Prow fork-PR plan path are the infrastructure automation entry points.
+- [x] GCP-954 is Closed with a final Asset Inventory caveat documented below.
+
+### Deliberate post-decommission residue
+
+The repository still contains two types of time-bounded historical references. They are not active Atlantis runtime dependencies:
+
+- `terraform/config/commons*/deletion-approvals.tf` retains expiring OPA approvals through `2026-09-30T23:59:59Z` as an audit trail for the reviewed deletions.
+- `enable_atlantis = false` is a deprecated compatibility workspace input for the already-retired Integration setting. The module variables document that it has no effect and should be removed as routine source cleanup.
+
+The final Cloud Asset Inventory sweep found 90 stale IAM-policy edges on six `DELETE_REQUESTED` Dev AIO projects. The Commons-dev Atlantis service account no longer exists, so these references cannot grant access. Allow the projects to purge, then repeat the sweep for a zero-result audit.
+
+---
+
+## Post-cutover delivery controls
+
+The migration did more than replace Terraform execution. It established the delivery controls required to operate TFC after Atlantis:
+
+- **Progressive delivery**: [GCP-985](https://redhat.atlassian.net/browse/GCP-985) moved workspace VCS tracking to GitOps Promoter environment branches. Existing workspaces used controlled freeze, lock, drain, branch-switch, verify, unlock, and auto-apply restoration steps. The resulting workspace definitions track `environment/*` branches rather than applying every workload directly from `main`.
+- **Fork PR plans**: [GCP-1006](https://redhat.atlassian.net/browse/GCP-1006) added a trusted Prow path for eligible fork PRs. It runs `terraform plan -refresh=false` from the trusted base configuration and reports the remote HCP Terraform run. Same-repository PRs continue to use native HCP Terraform speculative plans.
+- **Commons fork-PR coverage**: [GCP-1201](https://redhat.atlassian.net/browse/GCP-1201) converted the Commons workspace inventory to JSON and preserved `agent/` in the uploaded plan context so MintMaker's plan-time external data source works. The local regression suite passed; the story's original independent Prow canary was unavailable at closeout and should not be represented as completed evidence.
+- **MintMaker**: [GCP-1159](https://redhat.atlassian.net/browse/GCP-1159) removed the completed Atlantis compatibility surface and recognizes Terraform Cloud plan checks using provider-neutral CI evidence.
 
 ---
 
@@ -422,9 +453,10 @@ Disable Atlantis and remove its infrastructure after TFC is validated in integra
 | 3 | Commons grants | `gcp-hcp-infra` PR | SRE manual | Story 1 | ✅ Done |
 | 4 | Workspace definitions | `gcp-hcp-infra` PR | TFC meta workspace | Stories 1, 2, 3 | ✅ Done |
 | 5 | Validation | Manual testing | — | Stories 2, 3, 4 | ✅ Done (GCP-951) |
-| 6 | Scripts & tooling | `gcp-hcp-infra` + `gcp-hcp` PRs | N/A (tooling) | Story 4 | 🟡 Scripts done, docs pending (GCP-952) |
-| 7-8 | Stage & production rollout | — | — | Story 5 | 🔲 Not started (GCP-953) |
-| 9 | Atlantis decommission | — | — | Stories 5, 7, 8 | 🔲 Not started (GCP-954) |
+| 6 | Scripts & tooling | `gcp-hcp-infra` + `gcp-hcp` PRs | N/A (tooling) | Story 4 | ✅ Complete (GCP-952) |
+| 7 | Stage rollout | [#1574](https://github.com/openshift-online/gcp-hcp-infra/pull/1574) through [#1625](https://github.com/openshift-online/gcp-hcp-infra/pull/1625) | HCP Terraform plus reviewed bootstrap applies | Story 5 | ✅ Complete (GCP-953) |
+| 8 | Production access foundation | [infra-platform#183](https://github.com/openshift-online/infra-platform/pull/183), [#1829](https://github.com/openshift-online/gcp-hcp-infra/pull/1829) | Human-operated local execution with HCP Terraform state/locking | Story 7 | 🟡 Foundation complete; workload rollout deferred (GCP-1144) |
+| 9 | Atlantis decommission | [#1891](https://github.com/openshift-online/gcp-hcp-infra/pull/1891) through [#2045](https://github.com/openshift-online/gcp-hcp-infra/pull/2045) | HCP Terraform and reviewed human confirmations | Stories 5 and 7 | ✅ Runtime decommission complete (GCP-954) |
 
 Stories 2 and 3 can run in parallel (both depend only on Story 1).
 
@@ -532,13 +564,13 @@ The role set was derived **iteratively** from real first-runs — the stage-stat
 
 ---
 
-## Remaining Scope: Org-Level Terraform Config (GCP-1112) — 🔲 Not started
+## Org-Level Terraform Config (GCP-1112) — ✅ State Migration Complete, Human-Only Apply Model Retained
 
-[GCP-1112](https://redhat.atlassian.net/browse/GCP-1112) — "Migrate org-level Terraform config to TFC" — **Status: New. Nothing has been implemented.**
+[GCP-1112](https://redhat.atlassian.net/browse/GCP-1112) moved `terraform/config/org` for organization `428383927003` from its GCS backend into the dedicated `gcp-hcp-org` HCP Terraform workspace. [#1696](https://github.com/openshift-online/gcp-hcp-infra/pull/1696) made the backend transition and [#1702](https://github.com/openshift-online/gcp-hcp-infra/pull/1702) documented the supported verification flow.
 
-`terraform/config/org` (org `428383927003`) manages the `org-admin-jit` PAM entitlement and the `custom.allowedPolicyMembers` org policy constraint. It is currently GCS-backed with manual-only applies (see its README).
+This is intentionally **not** a VCS-driven or automated cloud-identity workspace. It uses CLI-driven local execution with HCP Terraform for state and locking, no VCS connection, no automated GCP identity, and automatic apply disabled. With approved human PAM access, the migrated five-resource state was verified by a live refresh plan with no changes. No Terraform apply was performed during the migration; the former GCS state remains a read-only recovery artifact.
 
-This is scoped **separately** from commons (GCP-1111) and the other migrations on purpose: a TFC identity applying this config would need org-admin-adjacent IAM (PAM entitlement admin, org policy admin), a materially higher blast radius than any per-project access identity used so far. Because of that, **an explicit security review is a blocking prerequisite** before any implementation. The migration approach (access-project shape, IAM scoping, guardrails) is deliberately not designed here and should not be until that review is complete.
+The human-only boundary is deliberate. `org-admin-jit` PAM entitlement and `custom.allowedPolicyMembers` policy resources require org-admin-adjacent authority. The migration therefore improved state custody and reviewability without delegating high-privilege organization mutation to an automated identity.
 
 ---
 
