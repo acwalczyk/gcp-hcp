@@ -96,7 +96,7 @@ The promotion flow applies to both y-stream and z-stream versions, with differen
 
 The promotion flow:
 
-1. Red Hat publishes a new GA version to Cincinnati (the platform can block versions from Cincinnati if needed)
+1. Red Hat publishes a new GA version to Cincinnati (version availability may be gated by Cincinnati conditional edges)
 2. The version becomes available in the corresponding channel (fast, stable, or EUS) per Red Hat's channel policies
 3. The platform evaluates the version against its promotion criteria (defined separately) to determine readiness as the channel default
 4. Once the criteria are met, the platform promotes the version to the channel's **default** — an internal platform operation, not a Cincinnati concept
