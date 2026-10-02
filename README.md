@@ -20,7 +20,7 @@ This repository is also a Claude Code plugin that provides skills for agents wor
 
 - **gcp-hcp-architecture** — topic-filtered access to design decisions, implementation plans, and architectural invariants
 - **add-gcp-service-account** — step-by-step playbook for adding new GCP service accounts for WIF across all repos
-- **pr-review** — first-pass code review plus repository-specific merge-readiness checks for GCP HCP team repositories
+- **bot-pr-review** — first-pass code review plus repository-specific merge-readiness checks for GCP HCP team repositories
 
 ### Installation
 
