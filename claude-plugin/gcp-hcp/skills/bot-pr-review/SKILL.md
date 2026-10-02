@@ -195,9 +195,12 @@ from the PR and repository configuration before reporting a gate.
   read its nested guidance before reviewing tests or generation.
 - Check the repository-level commands and affected-module tests/lint rather than
   running or expecting a root `go test ./...` where no root module exists.
-- Its current PR automation is Konflux/Tekton Pipelines-as-Code. Inspect the
-  actual build, image, scan, and validation contexts for the changed component;
-  do not assume generic `ci/prow/lint` or `ci/prow/test` contexts.
+- Its current presubmit automation is Prow ci-operator. The `main` branch has
+  two always-run contexts: `ci/prow/lint` (runs `make lint`) and
+  `ci/prow/test` (starts a Firestore emulator and runs `make test`). Check
+  both against the exact PR head SHA, and inspect the current
+  `openshift/release` job/config entries if this workflow changes. Do not
+  substitute Konflux/Tekton contexts for these Prow contexts.
 - For platform API or generated artifacts, check the source schema, generation
   command, generated public API, and compatibility implications together.
 - For controller or orchestration changes, review idempotency, ownership,
@@ -333,3 +336,8 @@ that install or load this plugin. It does not by itself change a Slack/Chai
 workflow. The bot integration must explicitly register or include the skill;
 until that is verified in the bot deployment, describe the result as a
 repository skill being prepared for integration, not as a live behavior change.
+
+The frontmatter `allowed-tools` names the read-only Claude Code GitHub MCP
+tools for this plugin. Chai's coordinator or workspace runtimes may expose
+different tool names; map equivalent read-only capabilities explicitly in that
+integration rather than assuming this list is portable.
