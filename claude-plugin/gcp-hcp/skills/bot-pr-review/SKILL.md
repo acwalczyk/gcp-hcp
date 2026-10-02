@@ -1,11 +1,11 @@
 ---
 name: bot-pr-review
 description: >
-  Perform a first-pass pull request review for GCP HCP team repositories and
-  commonly contributed upstream repositories. Covers substantive code review,
-  repository-specific merge readiness, CI/Tide interpretation, and actionable
-  next steps.
+  Use when explicitly asked to perform a first-pass pull request review for GCP
+  HCP team repositories or commonly contributed upstream repositories.
 argument-hint: "[PR URL]"
+allowed-tools: Read, Grep, Glob, mcp__github__get_me, mcp__github__get_file_contents, mcp__github__pull_request_read
+disable-model-invocation: true
 ---
 
 # GCP HCP Pull Request Review
@@ -38,6 +38,9 @@ or repository workflow requirements.
 - Never invent a required check, label, Jira rule, or merge blocker. If the
   relevant configuration or GitHub data is unavailable, report **Unknown** and
   say exactly what could not be verified.
+- Use only the read-only tools allowed by this skill. If a needed read operation
+  is unavailable, report **Unknown**; do not bypass the allowlist or use
+  write-capable GitHub tools.
 - Do not mutate GitHub state during a first-pass review. Do not add labels,
   approve, request changes, post `/lgtm`, post `/approve`, trigger tests, merge,
   or resolve review threads unless the user separately asks for that action.
@@ -48,9 +51,12 @@ or repository workflow requirements.
 
 ## Phase 1: Establish scope and evidence
 
-Parse the supplied URL into `owner/repository`, PR number, base branch, and
-head SHA. If the URL is missing or ambiguous, ask for the PR URL rather than
-guessing.
+Parse the supplied URL only into `owner/repository` and PR number. Obtain the
+base branch and current head SHA from live PR metadata; never infer either from
+the URL, a local checkout, the default branch, or an older comment. If the URL
+is missing or ambiguous, ask for the PR URL rather than guessing. If live PR
+metadata cannot be read, report **Unknown** and stop the merge-readiness
+assessment.
 
 Collect, using the available GitHub tools:
 
@@ -134,11 +140,15 @@ from the PR and repository configuration before reporting a gate.
 
 ### `openshift/hypershift`
 
-- Check Prow and GitHub Actions results, required labels (`approved`, `lgtm`,
-  `verified`, `jira/valid-reference`, and an applicable `area/*` label), and
-  current blockers such as `do-not-merge/needs-area` or `needs-rebase`.
-- Remember that cloud-consuming E2E jobs are gated behind `/lgtm`; a pending
-  E2E job before LGTM is not automatically a failure.
+- Check Prow and GitHub Actions results, plus labels commonly used here
+  (`approved`, `lgtm`, `verified`, `jira/valid-reference`, and an applicable
+  `area/*` label). Confirm which labels are required for the PR's base branch
+  against the current repository/Tide configuration before reporting one as a
+  missing gate. Also check current blockers such as
+  `do-not-merge/needs-area` or `needs-rebase`.
+- HyperShift contributor guidance says cloud-consuming E2E jobs are gated
+  behind `/lgtm`; verify the current job configuration and status before
+  treating a pending E2E job before LGTM as a failure or merge blocker.
 - Check the Jira-in-title/`NO-JIRA:` convention, imperative conventional commit
   subjects, reviewer/approver coverage, and the `make pre-commit` expectation.
 - For changes to pull secrets, ignition, MachineConfigs, or NodePool config
@@ -171,9 +181,10 @@ from the PR and repository configuration before reporting a gate.
   use the repository renderer and review the generated output.
 - The repository's common validation surface includes generated-file checks,
   orphan-module checks, GitOps promoter tests, image checks, Terraform tests,
-  and Terraform validation. Treat each as path- or configuration-dependent;
-  `ci/prow/terraform-plan` is a required-if-present context in the current
-  OpenShift release configuration, not proof that every PR must start it.
+  and Terraform validation. Treat each as path- or configuration-dependent.
+  For `ci/prow/terraform-plan`, inspect the current Prow/Tide configuration
+  and changed paths before treating it as required. An unchecked implementation
+  plan or stale configuration is not evidence that the context is active.
 - Treat `e2e-platform` as a separate platform-E2E signal. A requested or
   accepted rehearsal is not a completed passing run; match any success to the
   exact PR head SHA.
@@ -197,9 +208,13 @@ from the PR and repository configuration before reporting a gate.
 - Check the affected Go package with the repository's build, race-enabled unit
   test, and lint targets (`make build`, `make test`, and `make lint` where
   applicable).
-- Preserve the Zero Operator Access boundary: cluster interactions go through
-  Cloud Workflows, with auditable Workload Identity authentication and no
-  long-lived credentials.
+- Preserve the Zero Operator Access boundary: cluster and control-plane
+  operations go through Cloud Workflows. Read-only workflows may be permanently
+  available, but sensitive or destructive operations require PAM-approved,
+  time-bounded grants. Verify auditable identity/action and Workload Identity
+  authentication, with no direct `kubectl`, SSH, pod exec, or long-lived
+  credentials. A new destructive CLI/API operation must map to a PAM-gated
+  workflow rather than creating a direct-access bypass.
 - Review CLI/API compatibility, config precedence, error output, and tests for
   both success and failure paths. Do not infer a live GCP or workflow result
   from a local compile.
