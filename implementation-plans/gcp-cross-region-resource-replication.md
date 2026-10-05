@@ -2,11 +2,13 @@
 
 ## Overview
 
-This document specifies the generic cross-region resource replication mechanism for Gecko. It defines the event model, publisher/receiver architecture, conflict resolution, ownership transfer, and deployment topology.
+This document specifies the single-leader cross-region resource replication mechanism for Gecko. It defines leader/follower behavior, CLI routing, read-only enforcement, Pub/Sub event processing, follower mirror reconciliation, manual failover, and deployment topology.
 
 This implements the architecture decided in [cross-region-resource-replication](../design-decisions/infrastructure/cross-region-resource-replication.md).
 
 **Repository**: [gecko](https://github.com/openshift-online/gecko)
+
+**Status**: Implementation plan. The API prerequisites and acceptance tests below are pending Gecko work; this documentation does not establish that the current implementation satisfies them.
 
 ---
 
@@ -14,164 +16,311 @@ This implements the architecture decided in [cross-region-resource-replication](
 
 | Decision | Choice |
 |---|---|
-| Transport | Google Cloud Pub/Sub (shared topic, per-region subscriptions) |
-| Resource type selection | Startup flags (`--replicate`) — configurable per deployment |
-| Echo prevention | Annotation `replication.gcp.managed.openshift.io/replicated-from` + publisher predicate filter |
-| Conflict resolution | Last-writer-wins via `UpdatedAt` timestamp |
-| Ownership transfer | Editing a replicated object strips `replicated-from`, transfers ownership to the editing region |
+| Transport | Google Cloud Pub/Sub (leader-only data topic, separate resync control topic) |
+| Write authority | Exactly one configured leader region |
+| Follower behavior | Read-only mirror for replicated resource types |
+| CLI routing | Existing static endpoint discovery supplies a stable global authorization URL routed to the ready leader |
+| Forced follower writes | Reject with structured read-only error; no server-side redirect |
+| Leadership config | Leader region and generation in GitOps/Argo/Helm; applied at startup |
+| Failover | Manual promotion by changing leadership config after fencing old leader |
+| Replication direction | Leader to followers only |
+| Resource type selection | Startup flags or Helm values (`--replicate`) |
+| Event validation | Followers apply only events from the configured leader |
+| Event ordering | Leader API resource versions within a leadership generation; unordered delivery is expected |
+| Delete recovery | Versioned API watch deletes plus periodic authoritative LIST reconciliation |
 | Namespace handling | Receiver auto-creates target namespace if missing |
-| Error handling | Permanent errors Ack'd (prevent poison pill), logged at ERROR, counted via metrics; transient errors Nack'd (Pub/Sub retries) |
-| Periodic resync | Each Publisher re-publishes all locally-owned resources on a configurable interval (`--resync-interval`) |
-| New region bootstrap | On startup with empty database, publish `RESYNC_REQUEST` — existing regions immediately re-publish their resources |
-| Replicated object expiry | Objects carry a `refresh-deadline` annotation; GC deletes expired objects only when origin region is confirmed alive |
-| Observability | Structured audit logs + Prometheus metrics for all Publisher, Receiver, and GC operations |
+| Private API writes | Restricted by follower RBAC to replication and explicitly scoped local finalization |
+| Error handling | Permanent errors Ack'd, logged at ERROR, and counted; transient errors Nack'd for Pub/Sub retry |
+| Observability | Structured audit logs + Prometheus metrics for mode, lag, events, rejections, inventory, and split-brain |
 | Initial use case | Authorization Roles and RoleBindings |
+
+---
+
+## Terminology
+
+| Term | Meaning |
+|---|---|
+| Leader region | The single region configured to accept writes for replicated resource types |
+| Follower region | A non-leader region that mirrors leader state and rejects direct writes |
+| Mirror object | A local follower copy of an object whose authoritative source is the leader |
+| Leadership config | GitOps/Argo/Helm-delivered configuration naming the current leader region and generation |
+| Source resource version | API-assigned version of a source mutation; comparable only within its resource type and leadership generation |
+| Snapshot resource version | Collection version of a consistent source LIST; an unchanged object can have an older version |
+| Observed-through version | Source version through which a follower has verified a key, including absence |
+| RPO | Recovery Point Objective: accepted write loss during failover; unplanned loss may be unknown |
+| RTO | Recovery Time Objective: time to restore write availability, bounded by detection, fencing, config rollout, and validation |
+
+---
+
+## Configuration
+
+### Startup Flags
+
+| Flag | Env Var | Default | Description |
+|---|---|---|---|
+| `--region` | `REPL_REGION` | (required) | This region's identifier |
+| `--leader-region` | `REPL_LEADER_REGION` | (required) | Current leader region identifier |
+| `--leader-generation` | `REPL_LEADER_GENERATION` | (required) | Positive integer increased on every leadership change, including failback |
+| `--pubsub-project` | `PUBSUB_PROJECT` | `gecko-local` | GCP project ID for Pub/Sub |
+| `--pubsub-topic` | `REPL_PUBSUB_TOPIC` | `resource-replication` | Leader-only data topic |
+| `--pubsub-control-topic` | `REPL_PUBSUB_CONTROL_TOPIC` | `resource-replication-control` | Topic for `RESYNC_REQUEST` only |
+| `--pubsub-control-subscription` | `REPL_PUBSUB_CONTROL_SUBSCRIPTION` | (required in leader) | This region's subscription to the control topic |
+| `--pubsub-subscription` | `REPL_PUBSUB_SUBSCRIPTION` | (required) | Region-specific subscription name |
+| `--replicate` | `REPL_RESOURCE_TYPES` | (required) | Comma-separated resource types to replicate, for example `roles.gcp.managed.openshift.io,rolebindings.gcp.managed.openshift.io` |
+| `--resync-interval` | `REPL_RESYNC_INTERVAL` | `30m` | Leader interval for periodic resource resync and inventory publishing |
+
+Mode is derived from `region == leaderRegion` at startup. Leadership configuration is shared with public API write guards. Changing leader or generation requires GitOps rollouts of the affected API servers and replication controllers in every region; controllers do not refresh leadership configuration at runtime, and there is no automatic election. The `PUBSUB_EMULATOR_HOST` environment variable is supported for local development with the Pub/Sub emulator.
+
+---
+
+## Discovery and CLI Routing
+
+Use the existing per-environment static [endpoint discovery manifest](../design-decisions/networking/endpoint-discovery.md#global-authorization-endpoint). Terraform publishes a stable global authorization endpoint alongside regional endpoints through the same CDN/GCS discovery stack. The manifest advertises a URL; it neither identifies nor elects the current leader.
+
+### Behavior
+
+1. Resolve environment and public region through discovery. For Role and RoleBinding operations, use the versioned manifest's `global.authorization_endpoint` for reads and writes. Keep the selected regional `platform_api_endpoint` and OIDC issuer for other operations; adding replicated resource types requires an explicit client routing mapping.
+2. The infrastructure routes the stable global hostname to the configured, ready leader's existing regional public frontend. GitOps manages its DNS target, TLS/ingress host configuration, and ESPv2 accepted audience. No regional server proxies or redirects requests to another region, and routing never falls back automatically to a healthy follower.
+3. Preserve explicit endpoint override precedence. An explicitly selected regional follower endpoint may serve local reads, subject to replication lag, and must reject mutations. Overrides do not bypass authentication, authorization, or leadership gates.
+4. Clients validate the manifest schema and HTTPS URLs. Unsupported schema versions or a missing global endpoint yield an actionable discovery/configuration error, unless an explicit endpoint override is supplied; do not silently choose an arbitrary regional endpoint. Publish the versioned schema alongside the legacy region-only artifact and retain existing regional fields as specified in the discovery decision.
+5. On rejection or timeout, report the error and the stable authorization URL when configured. Refreshing discovery or reconnecting may resolve stale metadata/connections, but do not silently replay a mutation or ask customers to configure a new leader region after promotion. The global URL remains unchanged.
+
+### Global Hostname and Readiness
+
+All regional frontends that can receive the global hostname must recognize it separately from their normal regional hostname. Requests on the global hostname, including GET/LIST, succeed only at the designated leader after reconciliation/promotion checks and Cedar reloads have made the serving replica ready. A follower, fenced old leader, stale-generation process, or unready replica rejects global-host requests with a structured unavailable response. Ordinary authentication and Cedar authorization still apply. Restrict this hostname to the advertised authorization resource routes; other regional APIs keep their regional endpoint.
+
+Install the expected global hostname from trusted deployment metadata, validate it at ingress, and preserve that validated routing identity to the API guard. Do not trust an arbitrary caller-supplied forwarded-host header. The guard checks durable active leadership generation and local readiness, so stale DNS, old connections, or rollout skew cannot serve a stale follower as the global authority. A request admitted before fencing may finish; planned transfer drains admitted mutations before its final snapshot.
+
+Prepare and validate the target's certificate, ingress host, ESPv2 issuer/audience configuration, and leader readiness before changing the Terraform-managed DNS target. DNS TTL affects recovery time, not authority: keep the old endpoint fenced throughout cache/connection expiry and when it recovers. Health checks may remove an unavailable leader from service but cannot promote a follower. Discovery stays static during an ordinary leadership change.
+
+### Follower Rejection Response
+
+Regional follower APIs reject mutating requests for replicated resource types with a structured response; global-host requests to a non-serving region use an unavailable error, including for reads:
+
+```json
+{
+  "error": "region is read-only",
+  "authorizationEndpoint": "https://authz.integration.gcp-hcp.devshift.net",
+  "retryable": false
+}
+```
+
+The hostname above is illustrative; Terraform derives the deployed endpoint from environment metadata. Use HTTP `503 Service Unavailable` for the global-host availability gate. Regional read-only errors use a deterministic non-success status selected during API implementation. Neither response redirects or authorizes an automatic mutation replay. Optional leader-region diagnostics are not client configuration requirements.
+
+---
+
+## Public API Read-Only Enforcement
+
+The public API server enforces leader-only writes for replicated resource types. The table below applies to regional hostnames; the global hostname additionally requires ready-leader status for every request, including reads.
+
+| Request | Leader Region | Follower Region |
+|---|---|---|
+| `GET` | Allow | Allow if exposed locally; CLI normally uses leader |
+| `LIST` | Allow | Allow if exposed locally; CLI normally uses leader |
+| `POST` | Allow after normal authorization | Reject read-only |
+| `PUT` | Allow after normal authorization | Reject read-only |
+| `PATCH` | Allow after normal authorization | Reject read-only |
+| `DELETE` | Allow after normal authorization | Reject read-only |
+
+The read-only guard runs after authentication and before resource mutation. Authorization still applies normally to allowed leader and follower reads and leader mutations. Follower rejection is not an authorization success; it is a regional mode constraint.
+
+---
+
+## Private API and RBAC
+
+Follower regions restrict human/operator writes through private API RBAC while preserving replication controller write access.
+
+### Goals
+
+* Human and operator identities should not create, update, patch, or delete replicated resource types in follower regions.
+* The replication controller ServiceAccount must be able to create, update, patch, and delete replicated resource types in follower regions so it can apply leader state.
+* Namespace read/create permissions remain available to the replication controller when namespace auto-creation is enabled.
+* Break-glass access, if required, must be explicit, audited, and outside the normal role bindings.
+
+Example replication controller ClusterRole:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: replication-controller
+rules:
+  - apiGroups: ["gcp.managed.openshift.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+```
+
+The RBAC rules for human/operator identities are environment-specific, but follower regions must not grant normal write verbs for replicated resource types to those identities.
 
 ---
 
 ## Annotations
 
-Two annotations control replication behavior. Both use the `replication.gcp.managed.openshift.io` prefix. All objects of configured resource types are globally replicated — there is no per-object opt-out.
+The replication controller uses annotations to mark follower mirror objects. Annotations are not used for ownership transfer.
 
 ### Replicated-From Annotation
 
-```
-replication.gcp.managed.openshift.io/replicated-from: <origin-region>
-```
-
-Set by the Receiver on objects it creates/updates from replication events. This annotation serves two purposes:
-
-1. **Echo prevention**: The Publisher's predicate filter excludes objects with this annotation, preventing infinite replication loops (A publishes → B receives and writes → B's publisher sees the write → filtered out because annotation is present).
-2. **Provenance tracking**: Indicates which region originally created the object.
-
-### Refresh-Deadline Annotation
-
-```
-replication.gcp.managed.openshift.io/refresh-deadline: <RFC3339 timestamp>
+```text
+replication.gcp.managed.openshift.io/replicated-from: <leader-region>
 ```
 
-Set by the Receiver on every upsert. Value is `now + replication-ttl` (configurable via `--replication-ttl`, default `2h`). The garbage collector uses this annotation to identify expired replicated objects. An object whose `refresh-deadline` is in the past is a candidate for deletion — but only if the origin region is confirmed alive (see [Replicated Object Expiry](#replicated-object-expiry)).
+Set by the Receiver on objects it creates or updates from leader replication events. This indicates the object is a follower mirror of leader-authoritative state.
+
+### Applied Event State
+
+The Receiver persists, per resource key, the active leadership generation, the last applied source object's UID and resource version (when present), an **observed-through version**, and whether the key is deleted. An incremental mutation at version R advances the observed-through version to R. A validated snapshot at version S advances it to S even if that object's own version is older. It also persists the last completed snapshot version per resource type. These records survive controller restarts; annotations alone cannot track a deleted object.
+
+The source version is internal replication state, separate from the follower's `metadata.resourceVersion`. Each local mutation receives its normal local API version. Leadership generation is not Kubernetes `metadata.generation`. Deletion records are not exposed as resources through ordinary GET/LIST. Preserve normal local UID allocation, update preconditions, validation, watch notifications, and finalizer behavior; if finalizers prevent removal, do not mark a deletion or prune complete until the object is gone.
+
+Track the source UID only as internal incarnation identity. A changed source UID at the same key means replacement: delete the old local incarnation using its local UID/version preconditions, wait for normal deletion to finish, then create the new mirror with a new local UID. Persist pending replacement work and recheck generation and newer source state before every step; never let a delayed deletion remove a replacement. Apply this rule to incremental upserts and snapshots, including a missed source DELETE.
+
+Source finalizers, owner references, deletion timestamps, and server-owned metadata are not copied to the mirror: they describe the source cluster's lifecycle. A source object remains desired while its source deletion is pending; actual source deletion removes the mirror. Preserve target-local safety finalizers and allow their explicitly authorized local controllers to complete finalization without granting general follower writes. A configured replicated type must have a documented metadata mapping and functioning local finalization path; unsupported lifecycle dependencies block enabling that type. Initial Role/RoleBinding replication must verify this contract. Do not unconditionally strip local finalizers to make reconciliation finish.
+
+Atomically validate the active generation, compare source state, and persist each local mutation with its tracking state before acknowledging application. These are internal storage requirements, not a new customer-facing replication or snapshot API. Concurrent receivers must use transactional compare-and-set checks or equivalent storage serialization; a process-local mutex alone is insufficient during overlapping pods. Namespace creation can precede this transaction because it is idempotent.
+
+---
+
+## Kubernetes API Prerequisites
+
+Replication consumes the leader's regional API using standard LIST/WATCH. It depends on the [Kubernetes API resource-version and list/watch contract](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions), rather than assigning versions in the publisher.
+
+| API guarantee | Required behavior |
+|---|---|
+| Mutation versions | Creates, updates, and actual deletions receive increasing resource versions within the same API group/resource type. Versions order committed state, not request start times. |
+| Version representation | Preserve decimal resource-version strings unmodified. Compare as arbitrary-precision integers; mutation versions are positive, while the initial empty-store snapshot boundary may be `0`; do not assume a fixed-width client representation or subtract versions to infer gaps. |
+| LIST snapshot | The collection version identifies a consistent snapshot, including when empty. An unqualified most-recent LIST must include all mutations committed before it began. Every continuation page belongs to that snapshot and has the same collection version. Item versions identify their last mutation, not the snapshot time. |
+| Expiration | An unavailable snapshot/continuation returns `410 Gone`; the client restarts the entire list. Never silently continue against newer state. |
+| WATCH | Resume after the requested version with retained changes, including correctly versioned deletes, or report expiration and require relisting. A list-to-watch transition must not silently lose mutations. Retention can be bounded. |
+| Local API behavior | Replication writes retain ordinary Kubernetes validation, concurrency, deletion, and watch behavior. Source identity/version tracking stays separate from target metadata. |
+
+Versions are compared only within one resource type and one leadership generation. A source datastore restore or counter rollback must not reuse versions within that generation: fence writes, increase the leadership generation, and reconcile before restoring service. The development in-memory store has process-lifetime data and needs a new generation/bootstrap after losing that state.
+
+### Pending Gecko Storage Work
+
+Inspection of Gecko at `3d67af5` identified these prerequisites. They must be implemented and tested in Gecko before enabling this replication protocol; the table is not a claim of completed fixes.
+
+| Component | Required implementation work |
+|---|---|
+| Spanner | Reuse the existing per-resource-type counter updated transactionally with mutations. Expose the deletion's new version instead of the deleted row's previous version. The application-generated `updated_at` is not a commit-order token. |
+| PostgreSQL | Replace `pg_current_xact_id()` ordering with a per-resource-type counter whose update and resource mutation share one transaction and serialization lock. `NOW()` and transaction IDs are not commit-order guarantees. Fence existing writers during migration, initialize above versions retained in resources/watch history, and invalidate incompatible old watch/continue tokens before resuming; do not mix allocation schemes. |
+| Memory | Keep mutation/counter changes under the store lock, increment on deletion, and provide snapshot-consistent lists for the process lifetime. |
+| LIST implementations | Preserve one snapshot across continuation requests; expose a collection boundary that covers deletes and empty results, not the maximum version among returned rows. Expire unavailable snapshots explicitly. |
+| WATCH implementations and API adapters | Carry the mutation version through to the watch object's metadata, especially for deletes. Detect unavailable history and relist rather than silently replaying only surviving objects. Test commit/broadcast interruption and reconnect behavior. |
+| Receiver storage | Support atomic local mutation/tracking and active-generation checks while preserving normal API semantics, including ordinary local versions and watch notifications. |
+
+The replication layer needs no publisher-owned counter, publisher ownership token, or unbounded watch history. No transaction couples a user write to Pub/Sub publication; committed-but-unpublished loss remains possible during unplanned regional failover.
 
 ---
 
 ## Replication Event Model
 
-Events are serialized as JSON and published to Pub/Sub as message payloads.
+Each create/update message contains one resource. Inventories contain bounded pages of resource keys and expected object versions; the full dataset is never placed in one Pub/Sub message.
 
 ```go
 type ReplicationEvent struct {
-    EventType    string          `json:"eventType"`    // "CREATE_OR_UPDATE" or "DELETE"
-    ResourceKind string          `json:"resourceKind"` // e.g., "Role", "RoleBinding"
-    OriginRegion string          `json:"originRegion"` // Region that originated the event
-    Namespace    string          `json:"namespace"`    // Resource namespace (empty for cluster-scoped)
-    Name         string          `json:"name"`         // Resource name
-    UpdatedAt    time.Time       `json:"updatedAt"`    // Timestamp for last-writer-wins
-    Object       json.RawMessage `json:"object"`       // Full serialized resource (CREATE_OR_UPDATE only)
+    EventType               string          `json:"eventType"` // CREATE_OR_UPDATE, DELETE, RESYNC_REQUEST, INVENTORY
+    ResourceKind            string          `json:"resourceKind"` // Registered group/resource identifier
+    OriginRegion            string          `json:"originRegion"`
+    Generation              uint64          `json:"generation"` // Replication leadership, not metadata.generation
+    SourceResourceVersion   string          `json:"sourceResourceVersion,omitempty"`
+    SnapshotResourceVersion string          `json:"snapshotResourceVersion,omitempty"`
+    Namespace               string          `json:"namespace,omitempty"`
+    Name                    string          `json:"name,omitempty"`
+    UpdatedAt               time.Time       `json:"updatedAt"` // Diagnostics only
+    SyncID                  string          `json:"syncID,omitempty"` // Unique capture ID, not an ordering token
+    Object                  json.RawMessage `json:"object,omitempty"`
+    PageIndex               uint32          `json:"pageIndex"` // Zero-based, INVENTORY only
+    PageCount               uint32          `json:"pageCount"` // INVENTORY only
+    Inventory               []ObjectRef     `json:"inventory,omitempty"`
+}
+
+type ObjectRef struct {
+    Namespace             string `json:"namespace"`
+    Name                  string `json:"name"`
+    SourceResourceVersion string `json:"sourceResourceVersion"`
+    SourceUID             string `json:"sourceUID"`
 }
 ```
 
-| Field | Description |
-|---|---|
-| `EventType` | `CREATE_OR_UPDATE` for upserts, `DELETE` for removals, `RESYNC_REQUEST` to trigger immediate resync from all regions. |
-| `ResourceKind` | The Kubernetes Kind of the resource (e.g., `"Role"`, `"RoleBinding"`). Used by the receiver to route deserialization. |
-| `OriginRegion` | The region where the event originated. Used for echo prevention — receivers skip events from their own region. |
-| `Namespace` | The Kubernetes namespace of the resource. Empty for cluster-scoped resources. |
-| `Name` | The resource name. Combined with `Namespace` and `ResourceKind`, this uniquely identifies the resource. |
-| `UpdatedAt` | Timestamp used for last-writer-wins conflict resolution. Derived from the resource's last-modified time or `time.Now()` for deletions. GCP NTP synchronization keeps clock skew under 1ms in practice, making timestamp comparison reliable for the expected write patterns. |
-| `Object` | The full JSON-serialized resource. Present only for `CREATE_OR_UPDATE` events. Absent for `DELETE` events. |
+| Event Type | Topic | Required version/capture fields |
+|---|---|---|
+| Incremental `CREATE_OR_UPDATE` | Data | `SourceResourceVersion` from the source object's metadata; no snapshot fields |
+| `DELETE` | Data | `SourceResourceVersion` of the source deletion event; no snapshot fields |
+| Snapshot `CREATE_OR_UPDATE` | Data | Original object `SourceResourceVersion`, LIST `SnapshotResourceVersion`, and `SyncID` |
+| `INVENTORY` | Data | LIST `SnapshotResourceVersion`, `SyncID`, page metadata, and expected object versions; no envelope `SourceResourceVersion` |
+| `RESYNC_REQUEST` | Control | No object data or resource versions |
+
+Snapshot object versions must be at or below their snapshot boundary. A snapshot object at version `37` in a LIST at `42` is valid. Do not overwrite its source metadata with `42`. Both versions are preserved for their separate purposes. Validate `ResourceKind` against the registered group/resource identifier (for example `rolebindings.gcp.managed.openshift.io`), not an ambiguous Kind name.
+
+### Size Limits
+
+[Pub/Sub limits](https://docs.cloud.google.com/pubsub/quotas) message data and total publish request size to 10 MB. Use a conservative application limit of 1 MiB per encoded event, including the envelope, and configure batching below the total request limit. Build inventory pages by encoded byte size, not object count. A single resource must fit its event limit; public and private write validation must enforce that limit before accepting a replicated resource. An existing oversized resource causes a visible resync failure, with no completed inventory or pruning. Do not truncate objects or silently skip them.
+
+### API Versions and Immutable Publication
+
+The API owns mutation ordering. Every event captures its payload and API-assigned version together. Retrying publication preserves both. A later read can produce another event using that read's actual resource version, but must never relabel previously captured data. Timestamps and Pub/Sub delivery order are not ordering authorities.
+
+Overlapping publishers in the same leader region may publish duplicate or differently timed snapshots. Their events remain safe because source versions and snapshot boundaries come from the same authoritative API. Correctness does not depend on one exclusive publisher process.
 
 ---
 
 ## Publisher
 
-The Publisher is a set of controller-runtime reconcilers — one per configured resource type. It watches local resource changes and publishes replication events to a shared Pub/Sub topic.
-
-### Setup
-
-```go
-func (p *Publisher) SetupWithManager(mgr ctrl.Manager) error {
-    // Register one controller per configured resource type
-    for _, gvk := range p.replicatedTypes {
-        ctrl.NewControllerManagedBy(mgr).
-            For(resourceForGVK(gvk)).
-            WithEventFilter(notReplicatedPredicate()).
-            Complete(reconcilerFor(gvk, p))
-    }
-}
-```
-
-### Predicate Filter
-
-The `notReplicatedPredicate()` filters out objects that have the `replicated-from` annotation. This prevents the publisher from re-publishing objects that were received from other regions, breaking the replication loop.
-
-```go
-func notReplicatedPredicate() predicate.Predicate {
-    return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-        _, hasAnnotation := obj.GetAnnotations()["replication.gcp.managed.openshift.io/replicated-from"]
-        return !hasAnnotation
-    })
-}
-```
+The Publisher is active only in the configured leader region. Run one LIST/WATCH loop per configured resource type against that region's own API. Capture the full replicated scope, across all namespaces for namespaced types, without selectors that could omit objects later subject to pruning. Followers receive data through Pub/Sub; they do not fetch resources directly from another cluster.
 
 ### Publishing Logic
 
-On reconcile:
+1. On startup, LIST the resource type, following continuation tokens to capture one complete snapshot. Publish its resource payloads and inventory as described below, then WATCH from the returned collection version. The API must either replay changes since that boundary or return expiration.
+2. Publish `ADDED`/`MODIFIED` watch payloads as incremental `CREATE_OR_UPDATE` events with the original object version. Publish `DELETED` with the deletion event's version and resource key. Watch bookmarks are resume information, not resource mutations.
+3. On watch interruption, reconnect from the last safely handled watch position. A publisher must not advance that position past unhandled events. On `410 Gone`, lost local progress, or an uncertain gap, perform a fresh LIST. Periodic inventories also repair events lost between API observation and publication.
+4. A key-only controller-runtime reconcile that returns `NotFound` cannot assign an authoritative deletion version. Schedule reconciliation from a complete LIST instead of fabricating a versioned delete. An informer resync against cached objects is not a substitute for an authoritative LIST.
+5. Validate encoded size and retry transient publish failures with the same captured version and content. A process restart may recover through a fresh LIST instead of keeping a durable publisher event queue.
 
-1. **Object not found** (deleted): Publish a `DELETE` event with the resource's namespace, name, and kind. This applies to both locally-owned and replicated objects — deletes propagate globally regardless of origin. (The predicate filter only applies to create/update events on existing objects; on deletion the object is gone, so the predicate does not fire.)
-2. **Object has `replicated-from` annotation**: Skip (belt-and-suspenders check — the predicate should have already filtered it).
-3. **Otherwise**: Serialize the object and publish a `CREATE_OR_UPDATE` event. This includes objects that were previously replicated but had their `replicated-from` annotation stripped via an edit (ownership transfer) — the Publisher picks them up as locally-owned and propagates the change.
+Followers do not register these data publication loops. Any follower attempt to publish `CREATE_OR_UPDATE`, `DELETE`, or `INVENTORY` is an error counted by `replication_events_rejected_total{reason="follower_publish"}`. Their control-topic `RESYNC_REQUEST` remains permitted.
 
-Failed publishes are requeued after a 5-second delay (`replicationRetryDelay`).
+### Periodic Resync and Inventory
 
-### Periodic Resync
+On startup, on `--resync-interval`, and on a resync request:
 
-On a configurable interval (`--resync-interval`, default 30m), the Publisher re-lists all locally-owned (non-replicated) resources of each configured type and re-publishes each as a `CREATE_OR_UPDATE` event. This follows the controller-runtime resync pattern:
+1. Create a unique `SyncID` for this capture and obtain all pages of one API LIST snapshot. Preserve the collection's `SnapshotResourceVersion` and each object's own `SourceResourceVersion`. An expired continuation abandons the attempt and restarts the entire LIST with a new `SyncID`; never combine pages from different attempts.
+2. After a complete successful LIST, publish individual snapshot `CREATE_OR_UPDATE` payloads and byte-bounded `INVENTORY` pages containing keys and expected object versions. Every message carries the same snapshot version and `SyncID`. Capture storage must be bounded; a capture that cannot fit the configured local budget fails visibly without publishing a complete inventory.
+3. Represent an empty list with one empty inventory page carrying its collection version. Do not infer the boundary from the maximum item version.
 
-- **Self-healing**: If a Pub/Sub message was lost, the next resync corrects it.
-- **Drift repair**: If a resource is in an inconsistent state across regions, the periodic resync converges it.
-- **Harmless duplicates**: The Receiver's last-writer-wins check ensures that re-published events for already-up-to-date resources are silently skipped.
-
-The resync iterates only over locally-owned resources (those without the `replicated-from` annotation). Resources received from other regions are not re-published — each region is responsible for re-publishing its own resources.
+Publication may be asynchronous and unordered. Receivers stage snapshot data until its complete set can be validated. Use one in-progress resync per kind per publisher, coalesce and rate-limit requests, and leave the watch loop running during periodic captures. A completed snapshot supplies authoritative repair even when no source mutations have occurred since the previous resync; its collection version may be unchanged.
 
 ### Resync Request Handling
 
-When the Publisher's companion Receiver receives a `RESYNC_REQUEST` event from another region, the Publisher triggers an immediate resync (re-list and re-publish all locally-owned resources), resetting the periodic resync timer.
+Followers publish `RESYNC_REQUEST` only to the control topic. The configured leader consumes requests through its regional control subscription and schedules resync. Followers do not register data publishers. Receivers reject data event types arriving on the control subscription, even if their JSON claims leader origin. The `follower_publish` metric covers attempted data publication, not legitimate control requests.
 
 ---
 
 ## Receiver
 
-The Receiver subscribes to the Pub/Sub topic via a region-specific subscription and processes incoming replication events.
+The Receiver consumes data from its region-specific subscription. The leader additionally consumes its own control subscription. Each subscription has a fixed topic role; the JSON payload cannot choose that role.
 
 ### Message Processing
 
-```
-Message received
-  ├─ Deserialize ReplicationEvent from JSON
-  ├─ Echo prevention: skip if event.OriginRegion == receiver.region
-  ├─ Route by EventType:
-  │   ├─ CREATE_OR_UPDATE → upsert()
-  │   ├─ DELETE → delete()
-  │   └─ RESYNC_REQUEST → trigger immediate Publisher resync
-  └─ Error handling:
-      ├─ Permanent error (Invalid, Forbidden, MethodNotSupported) → Ack, log ERROR, increment replication_events_dropped_total
-      └─ Transient error → Nack (Pub/Sub retries)
-```
+1. Validate message size, schema, event type for the subscription, registered resource type, version/capture fields, and agreement between envelope and object identity/version.
+2. Route control requests only to the configured leader's resync handler. They can never reach resource mutation handlers.
+3. On the data subscription, require configured leader origin and generation. IAM supplies publishing authority; `OriginRegion` alone does not authenticate the message. The leader skips its own data events.
+4. Ack and count stale or mismatched generations. A delayed follower rollout requests a fresh resync after installing its new configuration; periodic resync repairs acknowledged events missed during rollout.
+5. Dispatch incremental events to application and snapshot payloads/pages to durable assembly. Ack an incremental event only after its mutation/tracking is durable; Ack snapshot messages after durable staging. Staging is not application or inventory completion. Nack transient failures; Ack, log, and count permanent invalid events.
 
-### Upsert Flow
+### Incremental Upsert and Delete Flow
 
-1. Deserialize the incoming resource from `event.Object`
-2. **Namespace auto-creation**: If the target namespace does not exist, create it. This is critical for non-primary regions where namespace-creating controllers (e.g., Marketplace controller) may not run.
-3. Set the `replicated-from` annotation to `event.OriginRegion`
-4. Set the `refresh-deadline` annotation to `now + replication-ttl`
-5. Clear `ResourceVersion` (new write in local store)
-6. Attempt `Get` on the existing object:
-   - **Not found** → `Create` the object. Handle `AlreadyExists` gracefully (concurrent creation).
-   - **Found** → **Last-writer-wins**: compare `event.UpdatedAt` with the existing object's last-modified timestamp. If the incoming event is newer, update the object (including refreshing the `refresh-deadline`). If the existing object is newer or equal, still refresh the `refresh-deadline` (the origin region is alive and still claims this object).
+1. In the active generation, compare the incoming source version R against both the key's observed-through version and the last completed snapshot boundary for that resource type. Older-generation/no tracking state can be replaced by current-generation state.
+2. If R is at or below either current-generation boundary, Ack as a stale duplicate. A deletion record prevents delayed upserts from resurrecting an object.
+3. For upsert, ensure the namespace exists, handle source-UID replacement as specified in [Applied Event State](#applied-event-state), and apply the desired resource through the normal local mutation path, setting `replicated-from`. Allocate a local UID on create and use the local resource version for update preconditions; do not copy source UID/resourceVersion/generation into local server-owned metadata.
+4. For delete, remove the local mirror if present using local identity/preconditions. Record absence at R even if already absent. If local finalizers delay removal, retain pending work and complete it through normal deletion processing.
+5. Atomically recheck the active generation and ordering conditions, persist the local result and tracking state with observed-through R, then Ack application. Retry conflicts against newly read local state.
 
-### Delete Flow
-
-Delete the resource by namespace and name. NotFound is treated as success (idempotent). The replicated-from annotation on existing objects is not checked — if a DELETE event arrives, the object is removed regardless.
+Snapshot messages follow [inventory reconciliation](#completion-and-pruning), which permits validated same-version repair. Ordinary duplicate upserts never bypass the stale-event checks.
 
 ### Namespace Auto-Creation
 
@@ -188,82 +337,69 @@ func (r *Receiver) ensureNamespace(ctx context.Context, namespace string) error 
 }
 ```
 
-This requires the replication controller's RBAC to include `get`, `list`, `watch`, `create` on `namespaces`.
+This requires the replication controller's RBAC to include `get`, `list`, `watch`, and `create` on `namespaces`.
+
+---
+
+## Leader Inventory Reconciliation
+
+### Inventory Page
+
+```json
+{
+  "eventType": "INVENTORY",
+  "resourceKind": "rolebindings.gcp.managed.openshift.io",
+  "originRegion": "us-east1",
+  "generation": 3,
+  "snapshotResourceVersion": "42",
+  "syncID": "capture-7b423ac1",
+  "pageIndex": 0,
+  "pageCount": 1,
+  "inventory": [
+    {"namespace": "customer-a", "name": "service-admin", "sourceResourceVersion": "37", "sourceUID": "aa6517e9-4c78-4d20-8482-f969298107e5"}
+  ]
+}
+```
+
+The corresponding snapshot payload carries source version `37`, snapshot version `42`, and the same `SyncID`; its object metadata still has source version `37`. An empty type has one empty inventory page. `SyncID` is unique per capture, including repeated captures at the same snapshot version.
+
+### Completion and Pruning
+
+1. Group pages and snapshot payloads by `(generation, resourceKind, SyncID)`. Validate a shared snapshot version S, a consistent page count, every page index, unique resource keys, and expected source versions at or below S. Match each payload's identity, source UID, and version to its inventory entry. Identical redelivery is harmless; conflicting duplicates or unreferenced payloads invalidate the set. Persist staging before Ack and bound its disk usage and lifetime. On timeout/capacity failure, abandon the attempt and request a fresh one; never prune from it.
+2. Ignore captures with S **below** the last completed boundary. For every inventory entry require its matching staged payload, unless current-generation durable tracking proves state strictly newer than S. A fresh validated capture at the same boundary is allowed to repair drift. Do not require unchanged object versions to equal S or treat a stale duplicate event as proof of snapshot repair.
+3. Apply the captured objects using transactional generation/order checks. Preserve a key with observed-through version greater than S. Otherwise restore the snapshot's desired state and persist its original object version plus observed-through S. Equal-boundary repair is permitted only through this validated snapshot path; it must not roll back newer mutations or bypass local preconditions/finalizers.
+4. Scan all local objects of the configured resource type, including former-leader objects with old/missing annotations. For objects absent from the inventory, prune only if their current-generation observed-through version is at or below S, or their state is old-generation/untracked. Preserve newer objects. Atomically record each completed prune as absence observed through S. Namespaces and non-replicated types are excluded.
+5. Persist completion at S only after every referenced key has been reconciled (or superseded by state newer than S) and pruning has succeeded. A crash leaves the staged capture retryable. The completed boundary rejects subsequently delayed incremental events at or below S and allows older per-key deletion records to be reclaimed. The global completed boundary never decreases; a later capture that has already completed supersedes older work.
+
+Every application/prune/completion transaction rechecks the active generation and latest completed boundary. Serialize reconciliation/application per type across receivers or provide equivalent transactional checks. A newer completed snapshot makes an older in-flight capture ineligible to continue. Partial work remains safe and retryable, but a capture is not reported complete until all work succeeds.
+
+This repairs dropped deletes and local drift without a global atomic replacement of the dataset. Different objects may temporarily represent different source states. Eventual convergence requires the leader API, publication, receiver storage, and periodic reconciliation to recover; it does not supply a fixed authorization-staleness bound during outages.
+
+### Leadership Transition
+
+Increment `leaderGeneration` for every promotion, including return to a previous region, and whenever source versions could be reused after datastore restoration. Retain the active `(leader, generation)` in durable regional replication state. Installing a new generation atomically invalidates mutations, pruning, and completion by old receivers, even for keys without current-generation tracking. A controller starting with older configuration must not lower this generation or become ready for replication work.
+
+Discard incomplete older-generation captures and request a fresh LIST-based resync. Existing objects remain until current-generation reconciliation replaces or prunes them. A newly added or recovered region stays out of customer traffic until all configured resource types complete a resync and each serving API replica reloads Cedar policies and invalidates caches. Healthy followers may continue serving their existing, potentially stale local authorization state during rollout.
 
 ---
 
 ## Pub/Sub Topology
 
-```
-Region A (Publisher)  ──publish──>  Pub/Sub Topic  <──publish──  Region B (Publisher)
-                                       │
-                          ┌─────────────┼─────────────┐
-                          ▼                           ▼
-                  Subscription A                Subscription B
-                  (Region A Receiver)           (Region B Receiver)
-                          │                           │
-                   echo prevention:             echo prevention:
-                   skip OriginRegion=A          skip OriginRegion=B
-                          │                           │
-                   process B's events           process A's events
+```text
+Leader --resource events / inventory pages--> Data topic --> Regional data subscriptions
+Followers --------RESYNC_REQUEST-----------> Control topic --> Leader's control subscription
 ```
 
-Each region has:
-- A **Publisher** that watches local resources and publishes to the shared topic
-- A **Receiver** that subscribes to the topic via a region-specific subscription and processes events from other regions
+### IAM Permissions
 
-The shared topic name and per-region subscription names are configured via startup flags.
-
----
-
-## Configuration
-
-The replication controller runs as a subcommand of the `gecko-controllers` binary.
-
-### Startup Flags
-
-| Flag | Env Var | Default | Description |
+| Regional controller identity | Data topic | Control topic | Subscriptions |
 |---|---|---|---|
-| `--region` | `REPL_REGION` | (required) | This region's identifier |
-| `--pubsub-project` | `PUBSUB_PROJECT` | `gecko-local` | GCP project ID for Pub/Sub |
-| `--pubsub-topic` | `REPL_PUBSUB_TOPIC` | `resource-replication` | Pub/Sub topic name |
-| `--pubsub-subscription` | `REPL_PUBSUB_SUBSCRIPTION` | (required) | Region-specific subscription name |
-| `--replicate` | `REPL_RESOURCE_TYPES` | (required) | Comma-separated list of resource types to replicate (e.g., `roles.gcp.managed.openshift.io,rolebindings.gcp.managed.openshift.io`) |
-| `--resync-interval` | `REPL_RESYNC_INTERVAL` | `30m` | Interval between periodic resyncs (re-publish all locally-owned resources) |
-| `--replication-ttl` | `REPL_TTL` | `2h` | TTL for replicated objects (refresh-deadline = now + TTL on each upsert). Must be > resync-interval. |
-| `--gc-interval` | `REPL_GC_INTERVAL` | `1m` | How often the garbage collector scans for expired replicated objects |
+| Current leader | Publish | No publish required | Consume its own data and control subscriptions |
+| Follower | No publish | Publish | Consume its own data subscription |
 
-The `PUBSUB_EMULATOR_HOST` environment variable is supported for local development with the Pub/Sub emulator.
+Use distinct regional workload identities and Terraform-managed topic IAM. No broader project-level publisher grant may give followers access to the data topic. Give each region a control subscription for use when promoted; enable control consumption only in the leader. Provisioning subscriptions before publishing and periodic resync cover startup and rollout gaps. Kubernetes RBAC for local replication writes is separate from Pub/Sub IAM.
 
-Startup validation: the controller rejects `--replication-ttl` values less than or equal to `--resync-interval` to guarantee at least one resync opportunity before expiry.
-
----
-
-## RBAC
-
-The replication controller requires a ServiceAccount with a ClusterRole granting:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: replication-controller
-rules:
-  # Replicated resource types (example: roles + rolebindings)
-  - apiGroups: ["gcp.managed.openshift.io"]
-    resources: ["roles", "rolebindings"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # Namespace auto-creation
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create"]
-  # Event recording
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
-```
-
-The RBAC rules should match the configured `--replicate` resource types. The namespace and events rules are always required.
+During promotion, revoke the old leader's data publishing permission and confirm effective denial before granting the new leader access. This accompanies fencing its public/private writes and stopping its publisher; permission changes alone do not prevent accepted-but-unpublished writes. A control-message body or attribute claiming leader identity never grants data publishing authority.
 
 ---
 
@@ -273,9 +409,11 @@ The RBAC rules should match the configured `--replicate` resource types. The nam
 
 The replication controller is a subcommand of the existing `gecko-controllers` binary:
 
-```
+```text
 gecko-controllers replication \
   --region=us-east1 \
+  --leader-region=us-east1 \
+  --leader-generation=1 \
   --pubsub-subscription=repl-us-east1 \
   --replicate=roles.gcp.managed.openshift.io,rolebindings.gcp.managed.openshift.io
 ```
@@ -293,7 +431,7 @@ ENTRYPOINT ["/app/gecko-controllers", "replication"]
 
 ### Kubernetes Deployment
 
-Single replica per region in the `gecko-system` namespace. Environment variables configure region, Pub/Sub project, topic, subscription, and (for local dev) the emulator host.
+Use one replica per region in `gecko-system` as the operational default. A Recreate rollout can reduce overlap but does not guarantee exclusivity during pod replacement. Overlapping same-leader publishers must be safe because payloads retain API-assigned versions; no custom publisher ownership or fencing protocol is required. Receivers still enforce transactional generation and application checks. Environment variables configure region, leader region/generation, Pub/Sub project, data/control topics and subscriptions, and emulator host for local development. Persist ordering and inventory state in the regional store, not pod-local memory.
 
 ---
 
@@ -301,190 +439,67 @@ Single replica per region in the `gecko-system` namespace. Environment variables
 
 ### Pub/Sub Emulator
 
-Local development uses the Google Cloud Pub/Sub emulator (`gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators`). In a multi-cluster Kind setup, the emulator runs as a standalone container on the Docker/Podman network (shared by both clusters), not inside either cluster.
+Local development uses the Google Cloud Pub/Sub emulator (`gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators`). In a multi-cluster Kind setup, the emulator runs as a standalone container on the Docker/Podman network shared by all clusters.
 
 ### Kind Multi-Cluster Setup
 
 The `deploy/kind/setup-multi-region.sh` script:
 
-1. Creates two Kind clusters (e.g., `gecko-us-east1`, `gecko-eu-west1`)
-2. Starts a shared Pub/Sub emulator container
-3. Creates topics and per-region subscriptions
-4. Builds and loads controller images into both clusters
-5. Deploys via Kustomize with region-specific overlays
-6. Configures in-cluster headless Services pointing to the shared emulator's container IP
+1. Creates at least two Kind clusters, for example `gecko-us-east1` and `gecko-eu-west1`.
+2. Starts a shared Pub/Sub emulator container.
+3. Creates data and control topics and per-region subscriptions.
+4. Builds and loads controller images into all clusters.
+5. Deploys via Kustomize or Helm with one leader overlay and one or more follower overlays.
+6. Configures in-cluster Services pointing to the shared emulator.
 
-### Kustomize Overlays
+### Kustomize or Helm Overlays
 
-Each region has a Kustomize overlay that patches the replication controller deployment with:
-- Region-specific environment variables (`REPL_REGION`, `REPL_PUBSUB_SUBSCRIPTION`)
-- Pub/Sub emulator host configuration
+Each region patches:
 
----
-
-## E2E Test Coverage
-
-The E2E test suite runs against two Kind clusters and validates:
-
-| # | Test | What It Validates |
-|---|---|---|
-| 1 | Unidirectional replication (A → B) | Resource created in A appears in B with `replicated-from` annotation |
-| 2 | RoleBinding replication | Namespace-scoped binding replicates correctly |
-| 3 | Bidirectional replication (B → A) | Resource created in B appears in A |
-| 4 | Echo prevention | Replicated object in B does not bounce back to A |
-| 5 | Deletion replication | Deleting a resource in A removes it from B |
-| 6 | Namespace auto-creation | Receiver creates the namespace in B if it does not exist |
-| 7 | Resync request (new region) | New region publishes `RESYNC_REQUEST`, receives all existing resources from other regions |
-| 8 | Periodic resync repairs drift | Resource manually deleted in B reappears after A's periodic resync |
-| 9 | Object expiry (origin alive) | Replicated object whose origin region is alive but stopped refreshing it is garbage collected after TTL |
-| 10 | Object preservation (origin offline) | Replicated object from an offline region (no recent refreshes on any of its objects) is preserved |
-| 11 | Dropped DELETE recovery | DELETE event permanently dropped; object expires via GC after origin region's next resync does not include it |
-| 12 | Ownership transfer via edit | Edit replicated object in B → `replicated-from` stripped → change propagates to A → A now has `replicated-from: B` |
-| 13 | Delete replicated object propagates | Delete a replicated object in remote region; verify it is removed from all regions including origin |
-
-Tests use polling with a 30-second timeout. A `--no-pause` flag supports CI execution (no interactive pauses).
+* `REPL_REGION`
+* `REPL_LEADER_REGION` and `REPL_LEADER_GENERATION`
+* `REPL_PUBSUB_SUBSCRIPTION` and `REPL_PUBSUB_CONTROL_SUBSCRIPTION`
+* `REPL_PUBSUB_TOPIC` and `REPL_PUBSUB_CONTROL_TOPIC`
+* Pub/Sub emulator host for local development
 
 ---
 
-## Replication Lifecycle
+## Manual Failover
 
-Resource replication operates at three levels:
+Leadership changes are manual. Automatic cross-region leader election is intentionally out of scope for the initial implementation.
 
-### 1. Watch-Based Publishing (Real-Time)
+### Data Loss and Freshness
 
-The primary mechanism. The Publisher watches local resource changes via controller-runtime reconcilers and publishes events immediately as they happen. This provides sub-second replication latency for normal operations.
+An unplanned failover may lose writes committed but not published, and messages published but not yet applied by the target follower. A recently applied event can coexist with an older undelivered revocation. Last-event age and the largest observed source resource version are freshness indicators; neither proves a complete applied history or bounds RPO. Resource versions are not counts of missing writes, and subtracting them is not a backlog or RPO measurement.
 
-### 2. Periodic Resync (Drift Repair)
+An outbox could durably record publication intent alongside a resource write, but it cannot recover data stored only in an unavailable region. It is outside this implementation. When the old leader is unavailable, document the unknown loss window and explicit operator acceptance of that risk. Promotion does not establish that pre-outage revocations reached the target.
 
-On a configurable interval (`--resync-interval`, default 30m), each region's Publisher re-lists all locally-owned (non-replicated) resources and re-publishes each as a `CREATE_OR_UPDATE` event. This follows the controller-runtime resync pattern and self-heals:
+### Failover Procedure
 
-- **Missed events**: If a Pub/Sub message was lost or Ack'd but not processed due to a bug, the next resync corrects it.
-- **Drift**: If a resource is in an inconsistent state across regions for any reason, the periodic resync converges it.
-- **No special code path**: The re-published events flow through the normal Receiver upsert path. The last-writer-wins check ensures duplicates are harmless.
+1. Select the target and declare planned transfer or unplanned failover. Keep target replicated-resource writes gated until the checks below finish.
+2. Fence all old-leader public and private writers. For a planned transfer, wait for all previously accepted mutations to finish committing, then keep its publisher available long enough to run one final resync with writes still fenced. Each final capture must start with a most-recent consistent API LIST after the drain barrier; `resourceVersion=0`/Any semantics or an older exact snapshot cannot establish final-transfer freshness. Record each final capture's generation, `SyncID`, and snapshot resource version, require the target to complete those specific inventories (even if their snapshot versions equal earlier captures), and explicitly reload policies and invalidate caches on every API replica that will serve the promoted region. Since writes are fenced, these inventories describe the final authoritative state.
+3. For an unplanned failover, inspect completed inventories, event age, apply/publish failures, and the target's local authorization state. Record acceptance of possible lost writes, including revocations. Reload Cedar from that local state on each serving replica; a rebuild timestamp alone does not establish source convergence.
+4. Stop the old publisher, revoke its data-topic publishing permission, and confirm effective denial. Ensure that restart/recovery cannot bring the old leader back with write authority.
+5. Update GitOps/Argo/Helm with the new `leaderRegion` and an increased `leaderGeneration`. Grant data publishing only to the promoted regional identity and install the corresponding control permissions.
+6. Roll out the target's controllers and public API configuration. Verify durable active generation, the planned-transfer or accepted unplanned-recovery checks, Cedar readiness on every serving replica, and global-host TLS/ingress/ESPv2 configuration before enabling replicated-resource writes. Its publisher begins a resync in the new generation from the promoted local state.
+7. Roll out remaining regions' controllers, API write guards, and follower RBAC. Each requests a fresh resync after installing the new configuration. Events rejected before rollout are repaired by this or the periodic resync.
+8. Change the global authorization hostname's Terraform-managed DNS target to the ready new leader. Verify discovered Role/RoleBinding reads and writes with unchanged customer CLI configuration, including authentication/TLS, and verify that stale DNS or persistent connections to the old leader receive rejection for reads and writes. Keep the old endpoint fenced. Verify every follower completes current-generation inventories for every configured kind. Monitor failures and freshness indicators; do not interpret them as a measured RPO.
 
-### 3. Resync Request (New Region Bootstrap)
+### Failback Procedure
 
-When a new region starts with an empty database, it publishes a `RESYNC_REQUEST` event to the shared topic:
+1. Recover the old leader with follower configuration and no data-topic publish permission. Keep its customer API out of traffic while it reconciles.
+2. Complete current-generation inventories for all replicated types. This includes removing locally authored objects absent from the new leader, even when they have no `replicated-from` annotation.
+3. Explicitly reload Cedar policies and invalidate caches on every serving API replica, then restore customer traffic. A reload failure keeps that replica unready.
+4. Optional promotion back uses the same failover procedure with another generation increment.
 
-```
-New region starts up
-  → detects empty database (no replicated resources of any configured type)
-  → publishes RESYNC_REQUEST to shared topic
-  → all existing regions receive it (echo prevention skips the requesting region)
-  → each existing region triggers an immediate resync:
-      re-lists and re-publishes all locally-owned resources
-  → new region's Receiver processes them through normal upsert flow
-  → new region is populated
-  → normal watch-based replication continues
-```
+### Split-Brain Guardrails
 
-**Design properties**:
-
-- **No cross-region API access**: Everything flows through Pub/Sub. No special credentials, no direct API calls to other regions.
-- **No one-time state tracking**: The resync request is fire-and-forget. If the new region restarts before it's fully populated, it detects the still-empty database and publishes another `RESYNC_REQUEST`.
-- **Additive**: The upsert flow creates missing resources. It does not delete resources that exist locally but not in other regions.
-- **Harmless to existing regions**: Existing regions also receive the re-published events but their last-writer-wins check skips already-up-to-date resources.
-
-### Operational Procedure — Adding a New Region
-
-Adding a new region (e.g., `europe-west4`):
-
-1. Deploy the Gecko infrastructure to the new region (platform-api-server, Helm charts for PlatformRoles, etc.)
-2. Create a Pub/Sub subscription for the new region on the shared replication topic
-3. Deploy the replication controller with the normal flags (no special sync flags needed)
-4. The controller detects an empty database, publishes `RESYNC_REQUEST`, and populates automatically
-5. Verify via E2E tests or `kubectl` that replicated resources are present in the new region
-
----
-
-## Replicated Object Expiry
-
-Replicated objects are treated as **leases** — they must be periodically refreshed by the origin region or they expire. This ensures that dropped DELETE events do not leave stale resources granting unintended access.
-
-### Refresh Mechanism
-
-Every time the Receiver upserts a replicated object (whether from a watch event, periodic resync, or resync request response), it sets the `refresh-deadline` annotation to `now + replication-ttl`. This means:
-
-- Objects that are still alive in the origin region get their deadline refreshed on every resync cycle
-- Objects that were deleted in the origin region stop being re-published, so their deadline is never refreshed
-
-### Garbage Collector
-
-A background goroutine runs on `--gc-interval` (default `1m`) and scans all replicated objects (those with a `replicated-from` annotation):
-
-```
-for each replicated object where refresh-deadline < now:
-    originRegion = object.annotations["replicated-from"]
-    otherObjects = all replicated objects from originRegion where refresh-deadline >= now
-    if len(otherObjects) > 0:
-        // Origin region is alive (other objects were recently refreshed)
-        // but this object was not refreshed → origin no longer has it
-        delete(object)
-        log INFO: "Expired replicated object {kind}/{ns}/{name} from {originRegion}"
-        increment replication_gc_expired_total
-    else:
-        // No recent activity from origin region → region may be offline
-        // Preserve the object as last-known-good state
-        log INFO: "Preserving expired object {kind}/{ns}/{name} — origin {originRegion} appears offline"
-        increment replication_gc_preserved_total
-```
-
-### Why This Is Safe
-
-- **DELETE event succeeds** (normal case): Object removed immediately. No expiry needed.
-- **DELETE event dropped** (permanent error): Origin region stops refreshing the object during periodic resync. On the next GC cycle after the `refresh-deadline` passes, the GC sees that other objects from the origin region are recently refreshed (origin is alive), so it deletes the stale object.
-- **Origin region offline**: No objects from that region are refreshed. All their deadlines eventually expire, but the GC sees zero recently-refreshed objects from that region and preserves everything. This is the safe behavior — an offline region's authorization data should not be garbage collected.
-- **Origin region comes back online**: Its next resync refreshes all objects it still has. Objects it deleted while offline are not refreshed and will expire on the next GC cycle.
-
-### Known Limitation
-
-If a region has exactly one replicated object in a remote region and that object is deleted, there are no "other objects" from the origin region to compare against. The GC treats the origin as offline and preserves the object. This is a minor edge case — for authorization data, the marketplace creates a RoleBinding alongside a Role, so there are always at least 2 objects per namespace.
-
----
-
-## Ownership Transfer
-
-Replicated objects can be edited or deleted from any region. Customers do not need to know which region created a resource.
-
-### Edit in a Remote Region
-
-When a customer edits a replicated object (one with a `replicated-from` annotation) via the public API:
-
-1. The edit succeeds — the public API does not block edits to replicated objects
-2. A public API validator (or admission webhook) strips the `replicated-from` annotation on update
-3. The object is now locally owned in the editing region
-4. The Publisher's watch detects the change (the object no longer has `replicated-from`, so the predicate allows it)
-5. The Publisher publishes a `CREATE_OR_UPDATE` event with the updated object
-6. All other regions (including the original origin) receive the event
-7. The Receiver in each region upserts the object — the original origin's copy gets `replicated-from: <new-owner>`, completing the ownership transfer
-
-```go
-func stripReplicatedFromOnUpdate(ctx context.Context, obj client.Object) {
-    annotations := obj.GetAnnotations()
-    delete(annotations, "replication.gcp.managed.openshift.io/replicated-from")
-    delete(annotations, "replication.gcp.managed.openshift.io/refresh-deadline")
-    obj.SetAnnotations(annotations)
-}
-```
-
-**Enforcement scope**: Public API only. The private API (kube-apiserver) is not affected — the Receiver uses the private API and must be able to set the `replicated-from` annotation.
-
-### Delete in Any Region
-
-When a replicated object is deleted (in any region, including remote regions):
-
-1. The delete succeeds locally — the object is removed from the database
-2. The Publisher's reconcile loop detects the deletion (object not found)
-3. The Publisher publishes a `DELETE` event to the shared topic — the predicate filter does not apply because the object no longer exists to inspect
-4. All other regions receive the DELETE event and remove their copies (including the origin region)
-
-This means a customer can delete a replicated resource from any region without needing to know which region created it. The deletion takes effect everywhere.
-
-### Convergence Properties
-
-- Ownership transfer is atomic from a convergence standpoint — after one resync cycle, all regions agree on the new owner
-- Concurrent edits in different regions are resolved by last-writer-wins (newer timestamp wins)
-- The periodic resync ensures the current owner's version eventually propagates even if individual events are lost
+* Mode is derived from `region == leaderRegion`.
+* Followers reject public writes on regional hostnames and all authorization requests on the global hostname.
+* Follower RBAC restricts private writes by human/operator identities.
+* Followers reject data events with a non-leader origin or mismatched generation. Topic IAM restricts publishing to the leader.
+* Alerts fire if more than one region reports leader mode.
+* Alerts fire if a follower publishes replication events.
 
 ---
 
@@ -492,73 +507,154 @@ This means a customer can delete a replicated resource from any region without n
 
 ### Audit Logs
 
-All replication operations emit structured log entries using the controller-runtime logger (`logger.Info`/`logger.Error` with key-value pairs).
+All replication operations emit structured log entries using the controller-runtime logger.
 
 **Publisher:**
 
 | Level | Event | Fields |
-|-------|-------|--------|
-| INFO | Published event | `eventType`, `resourceKind`, `namespace`, `name` |
-| INFO | Published after ownership transfer | `resourceKind`, `namespace`, `name` |
-| INFO | Published `RESYNC_REQUEST` | `region` |
-| INFO | Periodic resync completed | `resourcesPublished` (count) |
-| INFO | Skipped replicated object | `resourceKind`, `namespace`, `name` |
-| WARN | Publish failed, requeuing | `resourceKind`, `namespace`, `name`, `error` |
+|---|---|---|
+| INFO | Published event | `eventType`, `resourceKind`, `originRegion` |
+| INFO | Periodic resync completed | `resourceKind`, `resourcesPublished`, `syncID` |
+| INFO | Published inventory | `resourceKind`, `objectCount`, `syncID` |
+| WARN | Publish failed, requeuing | `resourceKind`, `error` |
+| ERROR | Follower attempted publish | `region`, `leaderRegion`, `eventType` |
 
 **Receiver:**
 
 | Level | Event | Fields |
-|-------|-------|--------|
-| INFO | Upserted resource | `eventType`, `resourceKind`, `namespace`, `name`, `originRegion`, `outcome` (`created`/`updated`/`skipped_stale`) |
-| INFO | Deleted resource | `resourceKind`, `namespace`, `name`, `originRegion` |
-| INFO | Created namespace | `namespace` |
+|---|---|---|
+| INFO | Upserted resource | `resourceKind`, `originRegion`, `outcome` |
+| INFO | Deleted resource | `resourceKind`, `originRegion` |
+| INFO | Created namespace | `namespaceHash` |
 | INFO | Received `RESYNC_REQUEST` | `originRegion` |
-| INFO | Refreshed deadline (stale event) | `resourceKind`, `namespace`, `name`, `originRegion` |
-| ERROR | Permanent error, Ack'd | `eventType`, `resourceKind`, `namespace`, `name`, `originRegion`, `error` |
+| INFO | Applied inventory | `resourceKind`, `originRegion`, `syncID`, `generation`, `snapshotResourceVersion`, `objectCount`, `prunedCount` |
+| WARN | Rejected stale event | `resourceKind`, `originRegion`, `generation`, `sourceResourceVersion`, `snapshotResourceVersion` |
+| ERROR | Rejected non-leader event | `eventType`, `resourceKind`, `originRegion`, `leaderRegion` |
+| ERROR | Permanent error, Ack'd | `eventType`, `resourceKind`, `originRegion`, `error` |
 
-**Garbage Collector:**
+**Public API:**
 
 | Level | Event | Fields |
-|-------|-------|--------|
-| INFO | Expired object deleted | `resourceKind`, `namespace`, `name`, `originRegion` |
-| INFO | Expired object preserved | `resourceKind`, `namespace`, `name`, `originRegion`, `reason` (`origin_offline`) |
-| INFO | GC cycle completed | `scanned`, `expired`, `preserved` |
+|---|---|---|
+| INFO | Rejected follower write | `region`, `leaderRegion`, `resourceKind`, `verb` |
+
+**Sensitive-data policy**: Log fields must not expose raw customer-controlled values such as resource `namespace` or `name`. Use opaque identifiers or omit these fields from structured logs. This follows the project's No-Sensitive-Data-In-Logs rule.
 
 ### Prometheus Metrics
 
 | Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `replication_events_published_total` | Counter | `event_type`, `resource_kind` | Events published by this region |
-| `replication_events_received_total` | Counter | `event_type`, `resource_kind`, `origin_region` | Events processed by the Receiver |
-| `replication_events_skipped_total` | Counter | `reason` (`echo`, `stale`) | Events skipped without processing |
-| `replication_events_dropped_total` | Counter | `event_type`, `resource_kind`, `reason` | Permanent errors Ack'd |
-| `replication_publish_errors_total` | Counter | `resource_kind` | Publish failures (requeued) |
+|---|---|---|---|
+| `replication_region_mode_info` | Gauge | `region`, `leader_region`, `mode` | Current regional replication mode |
+| `replication_events_published_total` | Counter | `region`, `event_type`, `resource_kind` | Events published by the leader |
+| `replication_events_applied_total` | Counter | `region`, `event_type`, `resource_kind`, `origin_region` | Events applied by receivers |
+| `replication_events_rejected_total` | Counter | `region`, `event_type`, `resource_kind`, `reason`, `origin_region` | Events rejected before apply |
+| `replication_events_skipped_total` | Counter | `region`, `event_type`, `resource_kind`, `reason` | Events skipped without applying, for example echo, stale duplicate, or stale delete |
+| `replication_events_dropped_total` | Counter | `region`, `event_type`, `resource_kind`, `reason` | Permanent errors Ack'd |
+| `replication_readonly_write_rejections_total` | Counter | `region`, `resource_kind`, `verb` | Public API writes rejected in followers |
+| `replication_publish_errors_total` | Counter | `region`, `resource_kind` | Publish failures that are requeued |
 | `replication_publish_duration_seconds` | Histogram | `event_type` | Time to publish a single event |
-| `replication_receive_duration_seconds` | Histogram | `event_type` | Time to process a single received event |
-| `replication_resync_duration_seconds` | Histogram | | Time for a full periodic resync cycle |
-| `replication_gc_expired_total` | Counter | `resource_kind`, `origin_region` | Objects deleted by GC (origin alive) |
-| `replication_gc_preserved_total` | Counter | `resource_kind`, `origin_region` | Expired objects preserved (origin offline) |
-| `replication_replicated_objects` | Gauge | `resource_kind`, `origin_region` | Current count of replicated objects |
+| `replication_receive_duration_seconds` | Histogram | `event_type` | Time to process a received event |
+| `replication_resync_duration_seconds` | Histogram | `resource_kind` | Time for leader resync and inventory |
+| `replication_inventory_sync_total` | Counter | `region`, `resource_kind`, `outcome` | Inventory sync outcomes |
+| `replication_inventory_pruned_objects_total` | Counter | `region`, `resource_kind` | Mirror objects pruned from completed leader inventory |
+| `replication_last_applied_event_age_seconds` | Gauge | `region`, `leader_region` | Time since last successful data-event application; freshness only, not backlog or RPO |
+| `replication_last_leader_event_timestamp` | Gauge | `region`, `leader_region` | Local Unix time of last successful data-event application |
+| `replication_inventory_last_completed_age_seconds` | Gauge | `region`, `leader_region`, `resource_kind` | Age of last successfully completed capture in the configured generation; reset completion state on generation change |
+| `replication_leader_generation` | Gauge | `region`, `leader_region` | Configured leadership generation |
+| `replication_oversized_events_total` | Counter | `resource_kind` | Encoded events rejected for exceeding the application size limit |
+| `replication_split_brain_detected_total` | Counter | `region` | Split-brain detection events |
+
+Exact resource-version strings, generation, and completed `SyncID` belong in durable diagnostic state and completion logs. Do not convert resource versions into floating-point gauges or high-cardinality metric labels. Promotion checks query exact completion records; counters and ages support monitoring, not proof of source convergence.
 
 ### Recommended Alerts
 
 | Alert | Condition | Severity |
-|-------|-----------|----------|
-| Replication events being dropped | `rate(replication_events_dropped_total[5m]) > 0` | Warning |
+|---|---|---|
+| No leader configured | No region reports `mode="leader"` | Critical |
+| Multiple leaders configured | More than one region reports `mode="leader"` | Critical |
+| Follower publishing events | `rate(replication_events_rejected_total{reason="follower_publish"}[5m]) > 0` | Critical |
+| Non-leader events received | `rate(replication_events_rejected_total{reason="non_leader_origin"}[5m]) > 0` | Critical |
+| No recent follower application | `replication_last_applied_event_age_seconds > threshold` (allow for idle periods and resync interval); also alert on absent telemetry | Warning |
+| Read-only write rejections spike | Unexpected increase in `replication_readonly_write_rejections_total` | Warning |
+| Inventory pruning failed | `replication_inventory_sync_total{outcome="failed"}` increases | Warning |
 | Sustained publish failures | `rate(replication_publish_errors_total[5m]) > 0.1` for 10m | Warning |
-| Replicated objects from a region dropping to zero | `replication_replicated_objects == 0` for a previously-nonzero origin region | Warning |
-| GC expiring objects | `rate(replication_gc_expired_total[1h]) > 10` | Info (may indicate a region deleted many resources) |
 
 ---
 
 ## Integration: Authorization Use Case
 
-The initial use case for cross-region replication is authorization Roles and RoleBindings. The integration points with the Cedar authorization system (see [Cedar authorization plan](gcp-cedar-public-api-authorization.md)):
+The initial use case for cross-region replication is authorization Roles and RoleBindings. The integration points with the Cedar authorization system are:
 
-- **Replicated resources**: `roles.gcp.managed.openshift.io` and `rolebindings.gcp.managed.openshift.io`
-- **PlatformRoles are NOT replicated**: They are system-defined and deployed identically to all regions via Helm
-- **Cedar hot-reload interaction**: When the receiver creates/updates/deletes a replicated Role or RoleBinding in the local database, the Cedar authorizer's watch mechanism detects the change and triggers a policy rebuild and cache invalidation — the same path as a local write.
-- **Marketplace integration**: The Marketplace controller creates the initial `service-admin` RoleBinding in the primary region. The replication controller propagates it to all other regions, ensuring the customer is authorized everywhere.
+* **Replicated resources**: `roles.gcp.managed.openshift.io` and `rolebindings.gcp.managed.openshift.io`
+* **Write authority**: Role and RoleBinding writes use the discovered global authorization endpoint, routed to the ready leader region.
+* **Follower reads**: Follower regions can evaluate authorization from local mirror data, subject to replication lag. The CLI uses the discovered global authorization endpoint for reads by default; this does not make regional Cedar caches immediately consistent.
+* **PlatformRoles are NOT replicated**: They are system-defined and deployed identically to all regions via Helm.
+* **Cedar hot-reload interaction**: When the receiver creates, updates, or deletes a mirrored Role or RoleBinding in the local database, the Cedar authorizer's watch mechanism detects the change and triggers policy rebuild and cache invalidation.
+* **Marketplace integration**: The Marketplace controller creates the initial `service-admin` RoleBinding through the leader. The replication controller propagates it to follower regions.
+* **Leader outage behavior**: During a leader outage, follower regions continue to evaluate Cedar authorization decisions from their local mirror data. Authorization remains available but may become stale — no new Roles or RoleBindings can be created, updated, or deleted until a new leader is promoted. Existing authorization grants remain in effect. There is no guaranteed staleness bound during an outage; previously missed changes and subsequent policy reload failures can extend it beyond promotion.
+* **Authorization convergence delay**: Replication convergence, where a follower mirror is up to date, does not guarantee immediate Cedar authorization convergence. After the receiver applies a leader event to the local store, the Cedar authorizer's watch mechanism must detect the change, rebuild affected policies, and invalidate caches. This adds watch and reload delay. The Cedar periodic resync is optional and disabled by default, so it supplies no unconditional staleness bound. Planned promotion and recovery explicitly reload policies and invalidate caches on every serving replica after reconciliation; a wall-clock rebuild timestamp alone does not prove that a specific revocation was loaded.
+
+---
+
+## E2E Test Coverage
+
+The planned E2E suite runs against one leader Kind cluster and at least one follower Kind cluster. All cases below are future implementation acceptance criteria, not tests implemented or executed by this documentation PR.
+
+| # | Test | What It Validates |
+|---|---|---|
+| 1 | Leader create replication | Resource created in leader appears in follower with `replicated-from` annotation |
+| 2 | Leader update replication | Resource updated in leader updates follower mirror |
+| 3 | Leader delete replication | Resource deleted in leader is removed from follower |
+| 4 | RoleBinding replication | Namespace-scoped binding replicates correctly |
+| 5 | Namespace auto-creation | Receiver creates missing namespace in follower |
+| 6 | CLI discovery routing | Role/RoleBinding reads and writes use the manifest's global URL; other resources and OIDC discovery retain regional selection; explicit overrides take precedence |
+| 7 | Forced follower public write rejected | Direct mutating request to follower returns read-only error |
+| 8 | Private follower write blocked | Non-replication private API identity cannot write replicated resource type in follower |
+| 9 | Replication controller follower write allowed | Replication controller can apply leader data in follower |
+| 10 | Follower does not publish | Local follower changes do not produce replication events |
+| 11 | Non-leader event rejected | Follower rejects replication event whose origin is not configured leader |
+| 12 | New region bootstrap | Follower publishes `RESYNC_REQUEST`; leader republishes current state |
+| 13 | Periodic resync repairs drift | Follower object manually deleted reappears after leader resync |
+| 14 | Inventory prunes stale mirror | Follower object absent from completed leader inventory is deleted |
+| 15 | Incomplete inventory does not prune | Follower preserves mirrors when inventory is incomplete or invalid |
+| 16 | Manual failover | Follower promoted through config accepts writes; old leader becomes follower |
+| 17 | Old leader rejoins as follower | Recovered old leader catches up from current leader |
+| 18 | Split-brain detection | Multiple leader reports trigger detection/alert metric |
+| 19 | Stale delete does not remove newer mirror | An out-of-order DELETE older than the current mirror is treated as a no-op |
+| 20 | Revoke-then-promote | A revocation confirmed by the final planned-transfer inventory is enforced by every promoted API replica; unplanned transfer does not claim this guarantee |
+| 21 | Delayed inventory versus newer create | A snapshot at API version S cannot prune a key observed at a later source version |
+| 22 | Inventory pages arrive before object events | No pruning/completion until all referenced state is applied |
+| 23 | Missing, conflicting, or expired pages | Incomplete assemblies never prune; a fresh resync repairs them |
+| 24 | Empty and multi-page inventories | Empty kinds clear stale state; large sets use bounded messages |
+| 25 | Delayed upsert after delete/prune | Persisted deletion state or completed boundary prevents resurrection, including after restart |
+| 26 | Former-leader and previous-origin objects | Missed deletes remove objects regardless of old/missing annotations |
+| 27 | A → B → A leadership | Earlier-generation events remain invalid when a region leads again |
+| 28 | Publisher restart, retry, and overlap | Two same-leader processes preserve payload/source versions; duplicates and reordered captures converge without publisher fencing |
+| 29 | Delayed configuration rollout | New-generation resync repairs data events acknowledged before rollout |
+| 30 | Forged data through control topic | Receiver rejects data payloads even if they claim leader origin |
+| 31 | Oversized resource and batch | Write validation rejects oversized encoded resources; publish batches stay below service limits |
+| 32 | Fresh event with older revocation pending | Freshness does not satisfy planned-transfer convergence checks |
+| 33 | Recovery interrupted during pruning | Retained pages and ordering state allow safe retry; APIs remain gated until recovery completes |
+| 34 | Write in flight when fencing begins | Planned transfer waits for its commit and then requests a most-recent consistent LIST; a stale but internally consistent snapshot cannot satisfy the barrier |
+| 35 | Concurrent API mutation contract | Each backend orders committed state correctly, including deletes; counters and mutations commit together |
+| 36 | Watch deletion version | Deletes carry their new mutation version through API adapters; old object versions are not reused |
+| 37 | Paginated API snapshot under writes | All pages retain one snapshot boundary; object versions may be older; empty lists still cover deletes |
+| 38 | Snapshot expires mid-LIST | `410 Gone` abandons all pages, restarts with a new capture ID, and cannot authorize partial pruning |
+| 39 | List/watch gap and reconnect | Required history is replayed or explicitly expires; interruption around commit/broadcast repairs through relisting |
+| 40 | Unchanged-source drift repair | A new capture at the same boundary restores a missing/modified mirror without accepting ordinary duplicate grants after deletion |
+| 41 | Delete and recreate same name | A missed DELETE followed by a new source UID replaces the old local incarnation through normal deletion/create, including changed immutable fields and delayed local finalizers; stale events cannot damage the replacement |
+| 42 | Old receiver overlaps generation change | Old processes cannot mutate, prune, or mark completion after a newer generation is installed |
+| 43 | Source datastore restore/reset | Reused versions require a new leadership generation and bootstrap; old messages remain invalid |
+| 44 | Kubernetes metadata and deletion | Mirrors receive local UID/resourceVersion/generation; source versions stay internal; source lifecycle metadata is not copied; local preconditions and authorized finalization remain effective |
+| 45 | PostgreSQL version migration | Writer cutover prevents mixed schemes, avoids version reuse, and invalidates incompatible watch/continue tokens |
+| 46 | Versioned discovery compatibility | Legacy region-only clients remain supported; new clients validate the schema and report absent/unsupported global endpoint configuration without arbitrary regional fallback |
+| 47 | Global endpoint planned failover | Terraform routing changes after target readiness; customer configuration and discovered URL stay unchanged; stale DNS/connections receive rejection from the old endpoint for reads and writes |
+| 48 | Global endpoint readiness and outage | Healthy followers and unready/stale-generation leader replicas cannot serve global GET/LIST or mutations; regional follower reads remain available and normally authorized |
+| 49 | Global frontend identity | Every promotion target serves the global TLS hostname and validates the configured ESPv2 issuer/audience; untrusted forwarded-host headers cannot bypass the gate; failed mutations are not silently replayed |
+
+Run IAM integration tests against real Pub/Sub with regional workload identities: a follower publishing a forged leader event to the data topic must receive permission denied, and old-leader publishing must be denied after handoff. Emulator tests do not validate production IAM. Test the storage ordering/atomicity contract on each supported backend. These are implementation acceptance criteria, not tests implemented in this documentation repository.
+
+Tests use polling with a 30-second timeout and shortened resync intervals in test deployments. A `--no-pause` flag supports CI execution.
 
 ---
 
@@ -567,11 +663,13 @@ The initial use case for cross-region replication is authorization Roles and Rol
 ```text
 controllers/
   replication/
-    publisher.go                        # Controller-runtime reconcilers for publishing
+    publisher.go                        # Leader-only API LIST/WATCH publication loops
     publisher_test.go
-    receiver.go                         # Pub/Sub message handler with upsert/delete
+    receiver.go                         # Pub/Sub message handler with validation, upsert, delete, inventory
     receiver_test.go
-    types.go                            # ReplicationEvent struct + constants
+    inventory.go                        # Leader inventory publishing and follower pruning helpers
+    inventory_test.go
+    types.go                            # Replication event structs + constants
   cmd/replication/
     cmd.go                              # Cobra subcommand + wiring
 deploy/kind/
@@ -581,10 +679,10 @@ deploy/kind/
     kustomization.yaml                  # Base kustomization
     rbac.yaml                           # ServiceAccount + ClusterRole + ClusterRoleBinding
     test/
-      e2e-test.sh                       # 8-scenario E2E test suite
+      e2e-test.sh                       # Leader/follower E2E test suite
   setup-multi-region.sh                 # Multi-cluster Kind setup script
   teardown-multi-region.sh              # Cleanup script
 deploy/multi-region/
-  us-east1/kustomization.yaml           # Region overlay (primary)
-  eu-west1/kustomization.yaml           # Region overlay (secondary)
+  us-east1/kustomization.yaml           # Region overlay, leader in default local setup
+  eu-west1/kustomization.yaml           # Region overlay, follower in default local setup
 ```
