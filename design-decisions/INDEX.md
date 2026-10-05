@@ -61,7 +61,7 @@ Decision records organized by topic. Use [TEMPLATE.md](TEMPLATE.md) when adding 
 | [automation-first-philosophy](automation/automation-first-philosophy.md) | Automation-first "allergic to toil" approach |
 | [terraform-infrastructure-as-code](automation/terraform-infrastructure-as-code.md) | Terraform as primary IaC scoped to region bootstrapping and foundational infra |
 | [terraform-code-structure](automation/terraform-code-structure.md) | Hierarchical Terraform directory structure separating global and regional resources |
-| [terraform-automation-tooling](automation/terraform-automation-tooling.md) | Atlantis for PR-based Terraform automation on global GKE clusters per environment |
+| [terraform-automation-tooling](automation/terraform-automation-tooling.md) | HCP Terraform with GitOps Promoter progressive delivery; Atlantis is historical |
 | [hcp-terraform-workload-identity-federation](automation/hcp-terraform-workload-identity-federation.md) | HCP Terraform WIF with dedicated access projects per environment |
 | [argocd-sync-wave-standardization](automation/argocd-sync-wave-standardization.md) | Standardized ArgoCD sync wave annotations using minimal 3-wave system |
 | [deployment-tooling-swim-lanes](automation/deployment-tooling-swim-lanes.md) | Configuration management swim lanes defining tool-specific resource lifecycle |

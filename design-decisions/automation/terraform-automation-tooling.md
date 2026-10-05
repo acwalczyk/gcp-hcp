@@ -1,10 +1,53 @@
-# Terraform Automation Tooling: Atlantis for PR-Based Infrastructure Management
+# Terraform Automation Tooling: HCP Terraform and Progressive Promotion
 
 ***Scope***: GCP-HCP
 
-**Date**: 2025-10-10
+**Original decision**: 2025-10-10 (Atlantis; superseded)
+**Current decision update**: 2026-10-05 (GCP-945)
 
-## Decision
+## Current decision: HCP Terraform with GitOps Promoter
+
+HCP Terraform is the current Terraform execution platform. The Atlantis choice below is historical: the migration completed for Integration and Staging, the Atlantis runtime was removed, and the current workspace and cutover details are recorded in the [GCP-532 implementation plan](../../implementation-plans/gcp-532-atlantis-to-tfc-cutover.md). Terraform changes now flow through GitOps Promoter's environment branches before they reach the HCP Terraform workspaces. This progressive promotion model postdates the original GCP-945 investigation.
+
+GitOps Promoter already propagates Terraform revisions through environment branches. HCP Terraform workspaces track those branches and run plans/applies when promotion updates them, so the old proposal to conditionally approve equivalent plans in each environment does not fit the current delivery flow. Do not add a second OPA conditional-apply gate for ordinary promotion.
+
+There is a narrower gap to verify: current GitOps Promoter configuration includes timer and ArgoCD health statuses, but not an HCP Terraform apply-success status. The [GCP-985 story](https://redhat.atlassian.net/browse/GCP-985) explicitly deferred that gate. Promotion ordering exists today; whether an environment's successful Terraform apply gates advancement to the next environment is a separate question and should be tracked against GCP-985.
+
+An initial local OPA canary-rule experiment rejected ordinary historical plans. That experiment was removed and is not recommended for attachment. Any additional conditional plan-action gate should be considered only if owners identify a safety requirement that progressive promotion does not already meet; it is separate from the existing pure-delete policy.
+
+The existing OPA deletion-protection policy is a separate resource-safety control. The [`infra-platform` PR #206](https://github.com/openshift-online/infra-platform/pull/206) expands the tenant configuration to target the Integration, Staging, Production, Org, Tooling, Commons, meta, and Test projects, plus the bootstrap workspace. The `gcp-hcp-ci` workload project stays on its separate CI security policy set; the shared `meta-gcp-hcp` project remains in scope, including its CI workspace-definition workspace. The CI security set retains its owner-grant and folder-IAM rules, but does not include the deletion policy, so CI is an explicit exception to this shared deletion-protection scope. The existing Rego policy rejects pure managed-resource deletes unless an unexpired, address-specific approval is supplied; it does not reject replacement actions. The policy set is configured as overridable.
+
+PR #206 leaves replacement matching unchanged. A failed mandatory OPA check halts the affected HCP Terraform run until an authorized override or a passing plan ([HCP Terraform policy enforcement](https://developer.hashicorp.com/terraform/cloud-docs/policy-enforcement/manage-policy-sets)). Integration and Staging workload runs auto-apply, and current GitOps Promoter configuration has no HCP apply-success status. Do not assume a failed Terraform run stops branch promotion. Assess historical replacement plans and the promotion/apply interaction before proposing that broader gate.
+
+Project targeting protects HCP remote-execution runs only. The current Org, Tooling access, Commons access, and Production access workspaces use local execution and do not receive HCP remote OPA evaluations. Production currently has no workload workspace; adding the Production project covers future remote workspaces but does not change apply settings. Integration and Staging workload workspaces remain auto-apply, and passing this deletion policy does not enable auto-apply. The HCP connector cannot enumerate project-level policy attachments, and sampled run details did not expose policy evaluations, so the source scope must not be described as verified live enforcement until actual run evaluations confirm it.
+
+Org Terraform remains a local, human-operated workflow. Production workload applies remain manual; the current Production access workspace is local and no Production workload workspace exists. Policy checks do not change workspace `auto_apply` settings.
+
+### Policy framework comparison
+
+| Mechanism | Fit for GCP-945 | Trade-off |
+|---|---|---|
+| **OPA** | The existing Rego deletion policy can inspect current-run plan actions. A separate conditional-apply rule could also inspect plan attributes, but it would not compare a plan with another workspace's historical plan. | A second conditional gate after PR review/promotion duplicates GitOps Promoter's current delivery role and needs an allowlist; it is not selected. |
+| **Sentinel** | Can inspect plan data and enforce equivalent workspace/environment-specific rules. | Introduces a second policy language and duplicates the existing Rego controls; it does not make a prior workspace plan available for comparison. |
+| **Post-plan run task** | Possible if owners still require an exact comparison between plans from different workspaces or a separate external approval service. | Requires an external endpoint, authentication, secure plan handling, availability, and run-task lifecycle/configuration. |
+
+OPA and Sentinel evaluate Terraform plan data using their own framework-specific input formats; OPA uses its documented `input.plan`/`input.run` data, not Sentinel's `tfplan/v2` import. A run task can call an external system after planning, but the comparison logic and its operational dependencies would still need to be built.
+
+### Rollout gates and baseline
+
+- No new conditional-apply policy is selected or proposed for attachment.
+- Recent HCP runs for Integration and Staging report `auto_apply = true`; sampled run details contain no policy-check relationships. The policy lookup connector reports direct/workspace/global attachments but cannot enumerate project-scoped attachments, and the HCP UI was not accessible in this audit. Therefore live project attachment, override permissions, and successful/failed policy evaluations remain unverified. Source configuration sets the deletion policy set to overridable; the identity authorized to use an HCP override still needs live verification.
+- The non-production Integration access workspace `gcp-hcp-int-tfc-access` is remote with `auto_apply = false`; it is not a workload canary for the auto-applied Integration workload runs.
+- Production currently has no workload workspaces; the Production access workspace is local/manual. The Production meta-workspace is an HCP workspace-definition runner, not a Production workload apply. Keep future Production workload applies manual until separately approved.
+- The infra-platform change adds project-level deletion-policy scope for Integration, Staging, and Production alongside Org, Tooling, Commons, meta, and Test, plus the bootstrap workspace. The `gcp-hcp-ci` workload project remains excluded under its separate CI security policy; `meta-gcp-hcp` remains included. This is the intended/source-configured scope until HCP run evaluations verify the live project attachments and policy results.
+
+The GCP-945 proposal is superseded for routine cross-environment delivery by GitOps Promoter. The remaining follow-up is to verify and, if still absent, implement the GCP-985 HCP apply-success status gate. The existing deletion-protection policy is separate; [infra-platform PR #206](https://github.com/openshift-online/infra-platform/pull/206) expands its project scope and leaves its pure-delete matching unchanged.
+
+---
+
+## Historical decision: Atlantis (superseded 2026-10-05)
+
+### Decision
 
 The GCP-HCP platform will adopt Atlantis as the pull request automation tool for Terraform workflows. Atlantis will be self-hosted on a global GKE cluster per environment (integration, stage, production), providing automated plan/apply workflows within the PR lifecycle while maintaining complete control over security and infrastructure. Complementary automation tooling may be added in the future for Terraform operations outside of the pull request context (e.g., scheduled operations, testing pipelines).
 
