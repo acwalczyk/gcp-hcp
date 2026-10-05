@@ -12,7 +12,7 @@ Decision records organized by topic. Use [TEMPLATE.md](TEMPLATE.md) when adding 
 | [gke-fleet-management](infrastructure/gke-fleet-management.md) | GKE Fleet for cluster bootstrap without external network access |
 | [shared-node-pools](infrastructure/shared-node-pools.md) | Shared node pool architecture for management cluster control plane components |
 | [hosted-cluster-upgrade-policy](infrastructure/hosted-cluster-upgrade-policy.md) | Mandatory platform-managed control plane upgrades with customer timing controls |
-| [cross-region-resource-replication](infrastructure/cross-region-resource-replication.md) | Generic Pub/Sub-based cross-region replication for API resources with annotation-based scope control |
+| [cross-region-resource-replication](infrastructure/cross-region-resource-replication.md) | Single-leader Pub/Sub replication using API resource versions and periodic reconciliation of read-only mirrors |
 
 ## Networking
 
@@ -27,7 +27,7 @@ Decision records organized by topic. Use [TEMPLATE.md](TEMPLATE.md) when adding 
 | [gcp-api-gateway-frontend](networking/gcp-api-gateway-frontend.md) | ~~GCP API Gateway for customer-facing API~~ *(superseded by espv2-api-frontend)* |
 | [espv2-api-frontend](networking/espv2-api-frontend.md) | ESPv2 sidecar with Cloud Endpoints for API frontend and Marketplace integration |
 | [customer-dns-zone-management](networking/customer-dns-zone-management.md) | Customer DNS zones created by control-plane-operator with WIF authentication |
-| [endpoint-discovery](networking/endpoint-discovery.md) | Per-environment static discovery manifest (CDN/GCS) so clients resolve endpoints from region + environment |
+| [endpoint-discovery](networking/endpoint-discovery.md) | Per-environment static discovery manifest (CDN/GCS) for regional endpoints and the stable global authorization URL |
 | [ci-externaldns-configuration](networking/ci-externaldns-configuration.md) | Dedicated public Cloud DNS zone with WIF for CI E2E ExternalDNS |
 | [oidc-cdn-public-serving](networking/oidc-cdn-public-serving.md) | Cloud CDN for public OIDC document serving |
 | [datastore-transport](networking/datastore-transport.md) | Firestore as transport layer for regional-management cluster communication |

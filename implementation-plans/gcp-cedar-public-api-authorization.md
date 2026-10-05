@@ -400,7 +400,7 @@ Optional periodic policy and cache resync provides a safety backstop against mis
 #### Cross-Replica Consistency
 
 - ResourceStore watches deliver changes written through any replica and changes written by the cross-region replication receiver
-- All replicas converge to the same policy set (eventually consistent, bounded by watch delivery latency)
+- Replicas converge when watch delivery and policy reloads succeed; delivery/reload failures prevent a fixed staleness bound
 - Cache invalidation is per-replica — each replica invalidates its own local cache on watch events
 - No shared state between replicas; each maintains independent policy set pointer and entity cache
 
@@ -646,9 +646,13 @@ Same as Role validation. PlatformRoles are only created via the private API (Hel
 
 **Operational note**: PlatformRole changes are operationally sensitive because they trigger full policy set rebuild and cache invalidation across all API server replicas. Changes should be deployed via Helm/ArgoCD with appropriate review and staging.
 
-### Ownership Transfer
+### Leader-Only Writes
 
-When a Role or RoleBinding with the `replication.gcp.managed.openshift.io/replicated-from` annotation is updated via the public API, the annotation is stripped automatically (along with `refresh-deadline`), transferring ownership to the editing region. The edit then propagates globally via the replication Publisher. See the [cross-region replication plan](gcp-cross-region-resource-replication.md#ownership-transfer) for details.
+Role and RoleBinding writes are accepted only in the configured leader region. Follower regions keep read-only mirrors of leader state and reject direct public API write attempts, even when the caller is otherwise authorized. The CLI resolves Role and RoleBinding operations through the global authorization URL in the existing [endpoint discovery manifest](../design-decisions/networking/endpoint-discovery.md#global-authorization-endpoint). Infrastructure routes that stable URL to the ready leader; global-host reads and writes are rejected elsewhere. Other resource endpoints remain regional, and customers do not reconfigure a leader region during failover. During a leader outage, Cedar authorization in follower regions continues to evaluate from local mirror data — existing authorization grants remain in effect, but no new Roles or RoleBindings can be created, updated, or deleted until a new leader is promoted.
+
+Cross-region replication consumes API resource versions and periodic complete LIST snapshots. Source versions and leadership generations remain internal replication metadata; local Role and RoleBinding mutations retain ordinary Kubernetes resource-version, generation, validation, and deletion behavior.
+
+Event freshness does not prove every earlier revocation has arrived. Unplanned promotion can lose authorization changes and requires explicit acceptance of that risk. During planned promotion or recovery of an old leader, complete the required per-kind inventories, then explicitly reload policies and invalidate caches on every serving API replica before restoring traffic. A recovered region remains unready if reconciliation or reload fails. Leader-local resource reads through the global URL do not guarantee immediate regional Cedar cache convergence. See the [cross-region replication plan](gcp-cross-region-resource-replication.md#manual-failover) for the procedure.
 
 ### ValidatorDeps
 
