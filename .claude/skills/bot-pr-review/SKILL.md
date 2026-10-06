@@ -1,0 +1,1 @@
+../../../claude-plugin/gcp-hcp/skills/bot-pr-review/SKILL.md
