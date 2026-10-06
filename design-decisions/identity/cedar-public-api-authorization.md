@@ -60,7 +60,7 @@ We will use [Cedar](https://www.cedarpolicy.com/) as the authorization engine fo
 
 ### Security:
 
-* Default-deny: a user with valid authentication but no role bindings gets 403 on every operation
+* Default-deny: a user with valid authentication but no role bindings gets 403 on every operation, except operations with an explicit documented authorization rule such as [authenticated catalog reads](authenticated-catalog-reads.md)
 * Header spoofing protection: the public API backend listener must only be reachable through the ESPv2 sidecar proxy. Direct external access to the application container/port must be blocked by network topology. The `X-Endpoint-API-UserInfo` header is trusted only when received from ESPv2.
 * Email claim validation: authentication requires non-empty `email` claim and `email_verified == true` when available from ESPv2. Email normalization (NFC Unicode normalization, lowercase domain, preserved local-part case) must match exactly between RoleBinding subject validation and request principal extraction.
 * Object-state ABAC: conditioned authorization evaluates Cedar policies against effective resource state (decoded request body for creates, stored object for reads/deletes, post-update state for updates). If required context cannot be built, authorization fails closed with 403.

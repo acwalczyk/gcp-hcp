@@ -39,7 +39,7 @@ This implements the architecture decided in [cedar-public-api-authorization](../
 
 ## Granular Permissions
 
-Every API operation maps to a single granular permission. Permissions follow the pattern `{resource}.{verb}` and each maps to a PascalCase Cedar action. All permissions are namespace-scoped.
+Every API operation maps to a single granular permission. Permissions follow the pattern `{resource}.{verb}` and each maps to a PascalCase Cedar action. All permissions in this model are namespace-scoped; [authenticated catalog reads](../design-decisions/identity/authenticated-catalog-reads.md) are an explicitly documented exception outside Cedar.
 
 | Permission | Cedar Action |
 |---|---|
