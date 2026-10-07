@@ -16,7 +16,7 @@ authorization model for non-namespaced resources.
 ## Context
 
 - **Problem Statement**: `gcphcpctl` validates a requested Version before
-  creating a Cluster, and access administrators need to discover platform-managed
+  creating a Cluster, and service admins need to discover platform-managed
   roles when creating or auditing RoleBindings. Version, Channel, and PlatformRole
   are non-namespaced, shared platform metadata resources, so their routes have no
   namespace. PlatformRole discovery is read-only; role definitions remain
