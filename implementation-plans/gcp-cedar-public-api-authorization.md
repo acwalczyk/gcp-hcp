@@ -21,7 +21,7 @@ This implements the architecture decided in [cedar-public-api-authorization](../
 | Principal validation | Non-empty `email` required; `email_verified == true` required when available; NFC Unicode normalization + lowercase domain + preserved local-part case |
 | API types | `PlatformRole` (cluster-scoped), `Role` (namespaced), `RoleBinding` (namespaced) |
 | System role seeding | Helm chart templates for PlatformRole CRDs, deployed via ArgoCD |
-| PlatformRole public API | None — no `platformrole.*` permissions exist; CRUD is via private API only |
+| PlatformRole public API | Authenticated, read-only cluster-scoped `get`/`list` outside Cedar; no `platformrole.*` permissions exist; mutations use the private API only |
 | Cedar conditions | On `RoleBinding.spec.condition` (not on Role), enabling per-user ABAC |
 | Object-state ABAC | Authorization evaluates Cedar against effective resource state: decoded body for creates, stored object for reads/deletes, post-update state for updates |
 | Policy generation | Per-binding with explicit namespace pins |
@@ -39,7 +39,7 @@ This implements the architecture decided in [cedar-public-api-authorization](../
 
 ## Granular Permissions
 
-Every API operation maps to a single granular permission. Permissions follow the pattern `{resource}.{verb}` and each maps to a PascalCase Cedar action. All permissions in this model are namespace-scoped; [authenticated catalog reads](../design-decisions/identity/authenticated-catalog-reads.md) are an explicitly documented exception outside Cedar.
+Every Cedar-authorized API operation maps to a single granular permission. Permissions follow the pattern `{resource}.{verb}` and each maps to a PascalCase Cedar action. All permissions in this model are namespace-scoped; [authenticated catalog and PlatformRole reads](../design-decisions/identity/authenticated-catalog-reads.md) are explicitly documented exceptions outside Cedar.
 
 | Permission | Cedar Action |
 |---|---|
@@ -70,7 +70,7 @@ Unknown permission names are rejected at validation time (Role and PlatformRole 
 
 ## System Roles
 
-System roles are `PlatformRole` resources (cluster-scoped, `+kubebuilder:resource:scope=Cluster`). They are deployed as Helm chart templates via ArgoCD, identical across regions. PlatformRoles have no public API endpoint — there are no `platformrole.*` permissions, so they are naturally immutable from the customer's perspective.
+System roles are `PlatformRole` resources (cluster-scoped, `+kubebuilder:resource:scope=Cluster`). They are deployed as Helm chart templates via ArgoCD, identical across regions. Authenticated callers can use the public API for read-only cluster-scoped `get` and `list` discovery outside Cedar; there are no `platformrole.*` permissions, and mutations remain unavailable through the public API.
 
 | Role | Permissions |
 |---|---|
@@ -107,7 +107,7 @@ PlatformRoles are gated by `.Values.platformRoles.enabled` so they can be disabl
 
 ### PlatformRole
 
-Cluster-scoped. Defines a set of permissions. Managed exclusively via the private API (kube-apiserver + kube RBAC) and Helm.
+Cluster-scoped. Defines a set of permissions. The public API provides authenticated read-only `get` and `list` discovery outside Cedar; mutations are managed exclusively through the private API (kube-apiserver + kube RBAC) and Helm.
 
 ```go
 type PlatformRole struct {
@@ -864,6 +864,8 @@ orlop/pkg/apiserver/
 - [ ] User-defined Role creation via public API succeeds
 - [ ] User-defined Role with valid permissions → accepted
 - [ ] User-defined Role with invalid permission → rejected with descriptive error
+- [ ] Authenticated PlatformRole list/get via the public API succeeds without a Cedar RoleBinding
+- [ ] Unauthenticated PlatformRole list/get via the public API returns `401 Unauthorized`
 - [ ] PlatformRole mutations via public API → no endpoint exists
 - [ ] RoleBinding referencing non-existent role → rejected at creation
 - [ ] RoleBinding with valid Cedar condition → accepted
