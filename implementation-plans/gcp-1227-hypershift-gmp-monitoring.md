@@ -15,7 +15,7 @@ Add a monitoring API-group selection to HyperShift so the control-plane-operator
 ### Goals
 
 - `MONITORING_API_GROUP` environment variable read by **both** the control-plane-operator and `hypershift install`, values `monitoring.coreos.com` (default) and `monitoring.googleapis.com`. An env var (not a CLI flag) is used because `hypershift install` emits monitoring resources from a runtime scheme initialized at `init()`, before flags are parsed — see the design decision.
-- GMP coverage for all current monitors — **11 ServiceMonitors + 8 PodMonitors + 1 PrometheusRule** (CPO level) and **4 management-level monitors** (install level). Note the mapping is **not 1:1**: GMP has no ServiceMonitor kind, so both `ServiceMonitor` and `PodMonitor` collapse onto `PodMonitoring`, and monitors targeting the same pods may be consolidated into a single `PodMonitoring` with multiple `endpoints`. The goal is that every CoreOS scrape *target* has GMP coverage, not that there are 20 matching GMP files.
+- GMP coverage for all current monitors — **11 ServiceMonitors + 8 PodMonitors + 1 PrometheusRule** (CPO level) and **2 management-level monitors + 2 PrometheusRules** (install level). Note the mapping is **not 1:1**: GMP has no ServiceMonitor kind, so both `ServiceMonitor` and `PodMonitor` collapse onto `PodMonitoring`, and monitors targeting the same pods may be consolidated into a single `PodMonitoring` with multiple `endpoints`. The goal is that every CoreOS scrape *target* has GMP coverage, not that there are 20 matching GMP files.
 - Preserve MetricSet (Telemetry/SRE/All) filtering by reusing `support/metrics/sets.go`, translating output into GMP relabel types.
 - GMP-gated NetworkPolicy allowing `gke-gmp-system` collector ingress.
 - Fail-fast validation when `MONITORING_API_GROUP=monitoring.googleapis.com` is combined with `RHOBS_MONITORING=1`.
@@ -30,7 +30,7 @@ Add a monitoring API-group selection to HyperShift so the control-plane-operator
 
 ## POC Path (proof-of-concept, before committing to full delivery)
 
-The full plan covers all 24 current CoreOS monitors (20 CPO + 4 install) — the GMP side will be *at most* 24 manifests and likely fewer, since `ServiceMonitor`/`PodMonitor` both collapse to `PodMonitoring` and same-pod targets can be consolidated. The POC exists to **prove the two real unknowns cheaply** — (a) can GMP collectors actually scrape the authenticated targets, and (b) does the env-var→context→predicate→manifest slice work end-to-end — before investing in all the GMP equivalents, the parity test, and docs. Everything below is deliberately narrowed to **etcd + kube-apiserver only** (the two hardest targets: mTLS and bearer token).
+The full plan covers all 24 current CoreOS monitoring resources (20 CPO + 4 install) — the GMP side will be *at most* 24 manifests and likely fewer, since `ServiceMonitor`/`PodMonitor` both collapse to `PodMonitoring` and same-pod targets can be consolidated. The POC exists to **prove the two real unknowns cheaply** — (a) can GMP collectors actually scrape the authenticated targets, and (b) does the env-var→context→predicate→manifest slice work end-to-end — before investing in all the GMP equivalents, the parity test, and docs. Everything below is deliberately narrowed to **etcd + kube-apiserver only** (the two hardest targets, both mTLS client-cert).
 
 The POC runs as **two decoupled tracks in parallel**:
 
@@ -38,7 +38,9 @@ The POC runs as **two decoupled tracks in parallel**:
 
 This is **Phase 0** and gates everything. It does not touch the HyperShift repo — it needs a live GKE management cluster with `gke-gmp-system` collectors.
 
-1. Hand-write plain-YAML `PodMonitoring` for **etcd** (mTLS: `tls.cert`/`tls.key`/`tls.ca` as Secret refs) and **kube-apiserver** (bearer token via `authorization`) — no Go, no typed structs.
+> **Status: COMPLETE — passed 2026-10-08.** etcd and kube-apiserver were scraped natively by `gke-gmp-system` collectors (`up=1`) on `dev-mgt-us-e4-dw0928-gke`. Both use mTLS client certs (no bearer token). ConfigMap-sourced CAs were mirrored into CA-only Secrets and the collector ServiceAccount was granted read via a namespaced Role/RoleBinding. Track B (the code slice) was **not** run — Phases 1–8 remain not-started.
+
+1. Hand-write plain-YAML `PodMonitoring` for **etcd** (mTLS: `tls.cert`/`tls.key`/`tls.ca` as Secret refs) and **kube-apiserver** (mTLS: `metrics-client` cert/key + `root-ca` CA as Secret refs) — no Go, no typed structs.
 2. Apply against a real GKE cluster and confirm the collectors scrape both targets.
 3. Determine the `gke-gmp-system` collector namespace/pod-label selector for the NetworkPolicy (needed by Track B step 5 and later Phase 6).
 4. Confirm any ConfigMap-sourced CA bundle has a Secret-based equivalent (GMP TLS supports Secret refs only).
@@ -53,13 +55,13 @@ A thin end-to-end slice through Phases 1–4, **etcd + kube-apiserver only**, de
 2. **Context threading** (Phase 1.2): add `MonitoringAPIGroup` to `ControlPlaneContext` + `WorkloadContext` and copy it in `workloadContext()`, mirroring `MetricsSet` exactly (see Phase 1 step 2).
 3. **Startup validation** (Phase 1.4): reject `MONITORING_API_GROUP=monitoring.googleapis.com` + `RHOBS_MONITORING=1`.
 4. **Predicates** (Phase 1.6): `isGMP` / `isNotGMP` as `func(component.WorkloadContext) bool`.
-5. **Emit `unstructured`, skip vendoring** (defer Phase 2): for the POC, build the GMP `PodMonitoring` objects as `unstructured.Unstructured` rather than vendoring `github.com/GoogleCloudPlatform/prometheus-engine`. This sidesteps design **open question #4** (maintainer sign-off on the new module dependency) and gets to a scraped metric faster. Swap to typed structs only when hardening for the real PR.
+5. **Emit `unstructured`, skip vendoring** (defer Phase 2): for the POC, build the GMP `PodMonitoring` objects as `unstructured.Unstructured` rather than vendoring `github.com/GoogleCloudPlatform/prometheus-engine`. This sidesteps the design decision's **CRD-dependency open question** (maintainer sign-off on the new module dependency) and gets to a scraped metric faster. Swap to typed structs only when hardening for the real PR.
 6. **Two manifests** (Phase 4, etcd + KAS only): add `gmp-podmonitoring.yaml` to the `etcd` and `kube-apiserver` components behind `isGMP`, keeping the existing `servicemonitor.yaml` behind `isNotGMP`. Reuse the YAML validated in Track A step 1.
 7. **Relabel translator** (Phase 3, minimal): translate `EtcdRelabelConfigs`/`KASRelabelConfigs` output into the GMP relabel shape for these two adapt functions only.
 
 ### Explicitly NOT in the POC (deferred to full delivery)
 
-- The other 18 CPO monitors and all 4 install-level monitors (Phase 5).
+- The other 18 CPO resources and all 4 install-level resources — 2 monitors + 2 rules (Phase 5).
 - Vendoring the GMP CRD Go types / typed structs (Phase 2) — POC uses `unstructured`.
 - The parity test + CI guard (Phase 7) — meaningless until most GMP equivalents exist.
 - Documentation (Phase 8).
@@ -117,7 +119,7 @@ MONITORING_API_GROUP=monitoring.googleapis.com
 
 ### Key design choices (from the design decision)
 
-1. **Activation**: `MONITORING_API_GROUP` environment variable read by both binaries (chosen over a CLI flag because `hypershift install` emits monitoring resources from a scheme initialized at `init()`, before flags are parsed; the specific variable name/values are pending final maintainer confirmation).
+1. **Activation**: `MONITORING_API_GROUP` environment variable read by both binaries (chosen over a CLI flag because `hypershift install` emits monitoring resources from a scheme initialized at `init()`, before flags are parsed; the variable name and values are confirmed by HyperShift maintainers).
 2. **Scheme**: register GMP types **additively or on-demand** for the GMP path only, driven by the env var at `init()` (available before scheme registration, like `RHOBS_MONITORING`); the env var selects what to *emit*, not what other platforms *register*. Registration is inert (it only teaches the client to (de)serialize a Kind), and emission is gated by the env-var default + `isGMP` predicate — so ROSA/ARO/self-managed are unaffected regardless of scheme contents. **Do not modify the coreos/rhobs registration those platforms build.**
 3. **Manifests**: separate GMP assets/constructors, never runtime conversion.
 4. **Selection**: existing CPOv2 predicate system (`isGMP` / `isNotGMP`), same pattern as `isAroHCP`.
@@ -125,16 +127,18 @@ MONITORING_API_GROUP=monitoring.googleapis.com
 
 ## Phased Delivery
 
-### Phase 0 — Feasibility Spike (BLOCKING, do first)
+### Phase 0 — Feasibility Spike (COMPLETE — passed 2026-10-08)
 
-The highest-risk unknown is authenticated scraping. Build a throwaway GMP `PodMonitoring` for **etcd** (mTLS, client certs) and **kube-apiserver** (bearer token) against a real GKE management cluster with GMP collectors and confirm the collectors actually scrape them.
+The highest-risk unknown is authenticated scraping. Build a throwaway GMP `PodMonitoring` for **etcd** (mTLS, client certs) and **kube-apiserver** (mTLS, client certs) against a real GKE management cluster with GMP collectors and confirm the collectors actually scrape them.
 
-- Confirm GMP collectors can present etcd client certificates (`tls.cert`/`tls.key` as Secret refs) — if not, etcd scraping needs an alternate path (proxy/sidecar) and the design must be revisited before proceeding.
-- Confirm bearer-token auth for kube-apiserver via GMP `authorization`.
-- Confirm ConfigMap-sourced CA bundles used by any CoreOS monitor have a Secret-based equivalent for GMP (GMP TLS supports Secret refs only).
-- Determine `gke-gmp-system` collector namespace/pod labels for the NetworkPolicy selector, and whether they are stable/documented.
+> **Status: COMPLETE — passed 2026-10-08** on `dev-mgt-us-e4-dw0928-gke`. Both etcd and kube-apiserver were scraped natively by `gke-gmp-system` collectors (`up=1`). Findings below confirmed; see GCP-1227.
 
-**Exit criteria**: etcd and kube-apiserver both scraped by GMP collectors, or a documented alternate approach for any target that cannot be. Record findings on GCP-1227.
+- **Confirmed**: GMP collectors can present etcd client certificates (`tls.cert`/`tls.key` as Secret refs) — no proxy/sidecar needed.
+- **Confirmed**: kube-apiserver uses mTLS client-certificate auth (`metrics-client` cert/key, `root-ca` trust bundle) — not a bearer token.
+- **Confirmed**: ConfigMap-sourced CA bundles (`root-ca`, `etcd-ca`) must be mirrored into CA-only Secrets for GMP (GMP TLS supports Secret refs only), and the collector ServiceAccount needs a namespaced `Role`/`RoleBinding` to read them (see Phase 4.5).
+- **Confirmed**: the `gke-gmp-system` collector peer is namespace `gke-gmp-system` + pod label `app.kubernetes.io/name=collector`.
+
+**Exit criteria (met)**: etcd and kube-apiserver both scraped by GMP collectors. Findings recorded on GCP-1227.
 
 ### Phase 1 — Env Var, Options, Scheme, Validation
 
@@ -158,7 +162,7 @@ Foundational plumbing, no manifests yet. CoreOS output must be unchanged after t
 
 ### Phase 2 — GMP CRD Types Dependency
 
-1. Vendor the GMP CRD Go types (candidate: `github.com/GoogleCloudPlatform/prometheus-engine/pkg/operator/apis/monitoring/v1`, providing `PodMonitoring`, `ClusterPodMonitoring`, `Rules`). Confirm module/version with maintainers (design open question #4).
+1. Vendor the GMP CRD Go types (candidate: `github.com/GoogleCloudPlatform/prometheus-engine/pkg/operator/apis/monitoring/v1`, providing `PodMonitoring`, `ClusterPodMonitoring`, `Rules`). Confirm module/version with maintainers (the design decision's CRD-dependency open question).
 2. Register `PodMonitoring` and `Rules` in **every scheme used to encode and apply** emitted resources — not only `AllMonitoringScheme`, which backs the `AllMonitoringYamlSerializer` *decode* helper. Identify the scheme(s) the control-plane-operator and `hypershift install` actually use to serialize and apply the monitors they emit (the main `Scheme` their clients build, alongside `AllMonitoringScheme` if the emit path also round-trips through the serializer), and register the GMP types there, following the additive-or-on-demand approach from Phase 1 step 5 (keyed off `MONITORING_API_GROUP` at `init()`, leaving the coreos/rhobs registration untouched).
 3. `go mod tidy` / `make vendor` / regenerate deepcopy if required; ensure the HyperShift build and image are unaffected on the default path.
 
@@ -200,9 +204,21 @@ component.NewStatefulSetComponent(ComponentName, &etcd{}).
 
 **Tests**: for each component, golden-file test of the rendered GMP resource per MetricSet; presence/shape of TLS and auth for etcd and kube-apiserver; assertion that with `isNotGMP` the CoreOS asset renders unchanged and the GMP asset is absent (and vice versa).
 
+### Phase 4.5 — CA Secrets & Collector RBAC (GMP-gated)
+
+GMP TLS supports only Secret-based CA refs, but the CoreOS monitors reference their CA as ConfigMaps (`root-ca`, `etcd-ca`). The GMP path must therefore mirror those public CA bundles into CA-only Secrets in the HCP namespace, and — because `gke-gmp-system` collectors run under their own ServiceAccount — grant that ServiceAccount read access via a namespaced `Role`/`RoleBinding`. Phase 0 confirmed collectors can read HCP-local Secrets once this RBAC exists; without it, scraping fails.
+
+- Owned by CPOv2, emitted behind the `isGMP` predicate in the HCP namespace, following the design decision's CA/RBAC-lifecycle rationale.
+- **CA-only Secrets**: reconcile `ca.crt` from the source `root-ca`/`etcd-ca` ConfigMaps (and any other ConfigMap-sourced CA used by an enabled GMP endpoint). Re-sync every reconcile so CA rotation propagates; copy only the public `ca.crt`, never private signing keys.
+- **`Role`**: `get`/`list`/`watch` on Secrets, restricted by `resourceNames` to the CA-only Secrets plus the existing client-credential Secrets the endpoints need (`metrics-client`, `etcd-metrics-client-tls`).
+- **`RoleBinding`**: bind the Role to the `gke-gmp-system` collector ServiceAccount (subject confirmed in Phase 0).
+- Owner-reference all objects to the HostedControlPlane so they are garbage-collected on teardown.
+
+**Tests**: with GMP selected, the CA-only Secrets, Role, and RoleBinding render with the expected `resourceNames` and subject; the Secret `ca.crt` matches the source ConfigMap; none are emitted on the default/CoreOS path.
+
 ### Phase 5 — Install-Level GMP Monitors
 
-Add GMP equivalents for the 4 management-level monitors in `cmd/install/assets/hypershift_operator.go` (Go constructors, matching today; could move to YAML assets — decide during implementation, raise with maintainers if it affects their conventions):
+Add GMP equivalents for the 4 management-level resources (2 monitors + 2 rules) in `cmd/install/assets/hypershift_operator.go` (Go constructors, matching today; could move to YAML assets — decide during implementation, raise with maintainers if it affects their conventions):
 
 | CoreOS constructor | Line | GMP equivalent |
 |--------------------|------|----------------|
@@ -219,7 +235,7 @@ Add GMP equivalents for the 4 management-level monitors in `cmd/install/assets/h
 ### Phase 6 — NetworkPolicy (GMP-gated)
 
 - **hypershift-operator plumbing (prerequisite)**: `reconcileOpenshiftMonitoringNetworkPolicy` runs in the **hypershift-operator** — a *third* binary, distinct from the control-plane-operator and `hypershift install` wired up in Phase 1. It therefore needs its own copy of the selection. Read `MONITORING_API_GROUP` from the environment at operator startup (same `init()`-time read as the other binaries; reuse the Phase 1 constants + validation helper), store it on the operator's options/reconciler, and thread it into the `hostedcluster` controller so `reconcileOpenshiftMonitoringNetworkPolicy` can branch on it. Without this step the GMP ingress rule below has no selection signal to gate on. (The operator does not *emit* monitors — it only needs the selection to gate the NetworkPolicy — so no scheme/predicate changes are required here.)
-- In `hypershift-operator/controllers/hostedcluster/network_policies.go`, extend `reconcileOpenshiftMonitoringNetworkPolicy` (`:576-593`) to add an ingress rule admitting GMP collectors from `gke-gmp-system` **only when GMP is selected**. Use the selector confirmed in Phase 0 (namespace selector vs. collector pod-label selector — decide during implementation based on Phase 0 findings).
+- In `hypershift-operator/controllers/hostedcluster/network_policies.go`, extend `reconcileOpenshiftMonitoringNetworkPolicy` (`:576-593`) to add an ingress rule admitting GMP collectors from `gke-gmp-system` **only when GMP is selected**. Reuse the existing broad monitoring policy shape (`podSelector: {}`, no port restrictions) with the Phase 0-confirmed collector peer (namespace `gke-gmp-system` + pod label `app.kubernetes.io/name=collector`). If the HyperShift team decides to descope collector access to specific metrics ports (the design decision's NetworkPolicy-scope open question), this plan will be updated to emit a per-endpoint destination set.
 - Default, ROSA HCP, and ARO HCP policies must be byte-for-byte unchanged (the new rule is additive and gated).
 
 **Tests**: operator correctly reads `MONITORING_API_GROUP` and threads it to the reconciler; policy with GMP selected contains the `gke-gmp-system` ingress rule; without GMP the policy is unchanged; RHOBS path unaffected.
@@ -249,6 +265,7 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 | Translation | per-action relabel translation; unsupported-action failure; MetricSet parity for etcd/KAS |
 | CPO manifests | golden files per component × MetricSet; predicate selection (GMP xor CoreOS); TLS/auth for etcd & KAS |
 | Install monitors | both selections render; default coreos; alerts in openshift-monitoring |
+| CA/RBAC | CA-only Secrets + collector Role/RoleBinding render GMP-gated; Secret `ca.crt` matches source ConfigMap; absent on default |
 | NetworkPolicy | GMP adds gke-gmp-system ingress; non-GMP unchanged |
 | Parity | repo-level: every CoreOS scrape target is covered by a GMP endpoint (coverage-based, not per-file twin; handles SM/PM→PodMonitoring collapse and consolidation) |
 | Regression | default and `RHOBS_MONITORING=1` outputs unchanged (golden) |
@@ -257,11 +274,11 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
-| GMP collectors can't present etcd client certs | etcd unscrapeable — blocks epic | Phase 0 spike before any manifest work; alternate proxy path if needed |
+| GMP collectors can't present etcd client certs | etcd unscrapeable — blocks epic | **Resolved in Phase 0**: collectors scraped etcd via mTLS client certs (`up=1`); no proxy needed |
 | Service→pod discovery mismatch | missed/duplicated targets | Per-ServiceMonitor discovery audit; golden tests assert selector target set |
-| ConfigMap-based CA refs unsupported in GMP | TLS config fails | Phase 0 audit; migrate CA to Secret where needed |
+| ConfigMap-based CA refs unsupported in GMP | TLS config fails | **Resolved in Phase 0**: CA bundles mirrored into CA-only Secrets + collector RBAC (Phase 4.5) |
 | Remote rule evaluation changes alert timing | alert semantics drift | Review affected rules for semantics drift before enabling GMP rules |
-| Vendoring GMP CRD types into upstream module | build/dependency concerns | Confirm module/version with maintainers (open question #4) before vendoring |
+| Vendoring GMP CRD types into upstream module | build/dependency concerns | Confirm module/version with maintainers (CRD-dependency open question) before vendoring |
 | Manifest duplication drift (CoreOS target added without GMP coverage) | Target silently unscraped under GMP | Coverage-based parity test (Phase 7) blocks CI |
 | Non-1:1 mapping mis-modeled (SM→pod selector narrows/widens target set; over-consolidation) | GMP scrapes a different target set than CoreOS | Per-target discovery audit (Phase 4); coverage test normalizes Service discovery to pod targets before comparing |
 | Scheme `init()` ordering | wrong types registered | Env var is read at `init()` (before scheme build), so there is no flag-vs-init ordering gap; isolation still comes from the default + `isGMP` at emit time |
@@ -281,6 +298,7 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 - [ ] Rule resources (the CPO recording-rule `PrometheusRule` + the 2 management-level recording/alerting rules) have matching GMP `Rules` and are verified **separately** from scrape-target coverage.
 - [ ] etcd and kube-apiserver GMP monitors preserve TLS/auth and are validated (Phase 0 evidence attached).
 - [ ] MetricSet (Telemetry/SRE/All) semantics preserved via the translation layer; no duplicated allow/drop lists.
+- [ ] CA-only Secrets and the collector Role/RoleBinding are emitted (GMP-gated), owner-referenced to the HCP, and absent on the default path.
 - [ ] GMP-gated NetworkPolicy admits `gke-gmp-system`; non-GMP/ROSA/ARO policies unchanged.
 - [ ] Coverage-based parity test fails CI when a CoreOS scrape target has no GMP coverage.
 - [ ] HyperShift docs updated (CRD install + `MONITORING_API_GROUP` usage).
