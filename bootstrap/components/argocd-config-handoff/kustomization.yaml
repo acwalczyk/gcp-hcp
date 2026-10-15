@@ -2,6 +2,10 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 # Opt-in migration component, not referenced by the default bootstrap.
 # Sync and verify this protection BEFORE releasing/removing these resources.
+# Trial selectors: ArgoCD/argocd/gitops and ConfigMap/argocd/argocd-cm.
+# Not production naming defaults: review both selectors and patch names.
+# See repository-root docs/openshift-gitops-configuration-handoff.md,
+# "Candidate assembly and checks", before adapting to another instance.
 patches:
   - target:
       group: argoproj.io

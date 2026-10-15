@@ -1,5 +1,10 @@
 # GCP-1282: Operator configuration ownership and cutover options
 
+> **TL;DR:** Keep one owner per setting. Prefer clean replacement only with
+> approved downtime/deletion and ready bootstrap/recovery inputs; use the optional
+> in-place handoff when existing identities must remain. Neither path requires
+> parallel Argo installations or authorizes a rollout.
+
 **Opt-in guidance; no default rollout.** The reviewed in-place transition completed on
 disposable MC and region trials on October 13, 2026; see the
 [sanitized validation record](openshift-gitops-configuration-validation.md).
