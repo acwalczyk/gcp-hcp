@@ -31,9 +31,10 @@ Two different Jira field types establish parent-child relationships:
 - **Direction**: Level 2 → Level 3
 - **Field ID**: `customfield_10014`
 
-### Parent Link Field
+### Parent Field
 - **Purpose**: Links all other hierarchical relationships
 - **Direction**: Epics → Features/Initiatives, Features/Initiatives → Outcomes → Strategic Goals
+- **Field**: Jira's native `parent` field (standard REST field, not a custom field — e.g. `{"key": "GCP-100"}`). This is sometimes still called "Parent Link" informally, but it is not `customfield_10018`; that custom field is a stale leftover from the Data Center → Cloud migration and is not populated on current issues.
 
 ---
 
@@ -92,8 +93,8 @@ When creating or updating Jira issues programmatically:
 
 1. **Check for existing parents first** — Don't auto-create; link to existing issues when appropriate
 2. **Use correct field for link type**:
-   - Stories/Tasks/Bugs → Epic: Use **Epic Link field**
-   - Epics → Feature or Initiative: Use **Parent Link field** (choose Feature OR Initiative, not both)
+   - Stories/Tasks/Bugs → Epic: Use **Epic Link field** (`customfield_10014`)
+   - Epics → Feature or Initiative: Use the native **`parent`** field (choose Feature OR Initiative, not both)
 3. **Create Epic first, then link to Feature** — Defensive two-step approach prevents creation failures
 4. **Don't force parent creation** — Only create parent issues when explicitly requested or contextually necessary
 
