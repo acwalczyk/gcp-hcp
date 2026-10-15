@@ -3,7 +3,7 @@
 **Evidence date: October 13, 2026.** This records bounded configuration ownership
 validation, not a production rollout or story closure. The team implementation
 defaults to legacy mode; no environment is enabled by publishing these changes.
-See the [cutover options and optional in-place handoff](openshift-gitops-configuration-handoff.md) and
+See the [agreed drop-in replacement plan and supporting seed handoff](openshift-gitops-configuration-handoff.md) and
 [proposed ownership decision](../design-decisions/automation/operator-managed-argocd-configuration.md).
 The companion settings matrix/tests live in
 `gcp-hcp-infra/docs/ARGOCD_OPERATOR_CONFIGURATION.md` and
@@ -12,8 +12,10 @@ The companion settings matrix/tests live in
 ## Scope and provenance
 
 Reviewed backports were delivered through separate observed revisions on existing
-personal trial branches. This records the **in-place ownership handoff**, not a
-complete clean-replacement/rebuild validation. The default team bootstrap does
+personal trial branches. This records the **configuration-ownership handoff on
+existing operator-managed instances**, not the complete newly agreed old-runtime
+scale-down and drop-in takeover. It also does not validate a delete/rebuild path.
+The default team bootstrap does
 not install the operator as a result of these changes. The companion implementation
 [PR #2315](https://github.com/openshift-online/gcp-hcp-infra/pull/2315) subsequently
 merged on October 14 as `fba968fac27d7dcd62aea60beabecf9969d3f3ce`; that does not
@@ -37,9 +39,12 @@ signed/supported release validation. No image upgrade occurred.
 ## Ownership transition results
 
 Each cluster followed protection → Config Sync release → existing-CR adoption →
-guarded tracking/seed retirement. Gates were observed before proceeding. This
-validated sequence remains an optional cutover when identities must be retained;
-it is not a requirement to preserve the old runtime in every future installation.
+guarded tracking/seed retirement. Gates were observed before proceeding. These
+configuration checks support the agreed replacement plan where seed ownership
+must transfer; the trials did not demonstrate quiescing a legacy non-operator
+runtime and adopting its resources with a new controller set. Do not treat the
+recorded CR/CM UID continuity as proof of matching Argo tracking identity across
+that runtime replacement.
 
 | Gate | Observed on both clusters |
 | --- | --- |
@@ -113,10 +118,12 @@ uninterrupted manager availability. The MC remained unchanged during region work
 1. Independently pin the target's sources/artifacts/CRDs and record required
    settings, original resource identities, owners, tracking, inventory and runtime
    status. Never copy MC identities or credentials to a region.
-2. To repeat this in-place validation, use the handoff procedure's separate
-   render/prune/ownership gates. A clean replacement requires a separately reviewed
-   bootstrap/deletion plan and new evidence; these trial results do not substitute
-   for it. Run the offline suite with both served CRDs and companion components.
+2. To repeat these configuration-ownership checks, use the supporting seed
+   handoff's separate render/prune/ownership gates. The agreed drop-in runtime
+   replacement separately requires old-controller scale-down, intended tracking
+   identity verification and takeover evidence. Run the offline suite with both
+   served CRDs and companion components; the earlier results do not substitute
+   for the runtime cutover test.
 3. For runtime health, execute `argocd admin settings resource-overrides health`
    against representative file fixtures and a captured live non-secret CM;
    explicitly disable cluster-settings reads. Ready pods/key presence alone do
@@ -152,5 +159,5 @@ separate GCP-1280 and GCP-1283–1289 adoption gates.
 The retired trial seeds cannot independently cold-start Argo CD after a cluster
 rebuild. A separately reviewed protected-seed/reclaim and exact-spec recovery
 plan is necessary. Successful manager replacement is not full-rebuild proof.
-Draft PRs and trial success do not satisfy merged-code/design or remaining team
-DoD requirements, and this report does not authorize another deployment.
+Trial success alone does not satisfy remaining design-review/merge or team DoD
+requirements, and this report does not authorize another deployment.

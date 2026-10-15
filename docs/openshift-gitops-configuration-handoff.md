@@ -1,12 +1,12 @@
-# GCP-1282: Operator configuration ownership and cutover options
+# GCP-1282: In-place replacement with operator-managed Argo CD
 
-> **TL;DR:** Keep one owner per setting. Prefer clean replacement only with
-> approved downtime/deletion and ready bootstrap/recovery inputs; use the optional
-> in-place handoff when existing identities must remain. Neither path requires
-> parallel Argo installations or authorizes a rollout.
+> **TL;DR:** Meet the new Argo requirements, take the old Argo controllers offline
+> with declarative scale-to-zero, then enable operator-managed takeover of retained
+> resources. Do not run both controller sets against the same resources. This is
+> the agreed direction, not authorization to execute a cutover or delete anything.
 
-**Opt-in guidance; no default rollout.** The reviewed in-place transition completed on
-disposable MC and region trials on October 13, 2026; see the
+**Opt-in guidance; no default rollout.** Configuration ownership was validated on
+existing operator-managed MC/region instances on October 13, 2026; see the
 [sanitized validation record](openshift-gitops-configuration-validation.md).
 The companion implementation [PR #2315](https://github.com/openshift-online/gcp-hcp-infra/pull/2315)
 has merged; chart/matrix/tests are documented in
@@ -15,45 +15,95 @@ chart revisions before proposing a live transition. The existing
 `bootstrap/kustomization.yaml` does not reference these opt-in components;
 ordinary bootstrap output is unchanged.
 
-## Choose a cutover
+## Agreed replacement sequence
 
-The required design is **one owner per setting**, with the private chart supplying
-supported CR inputs and the operator generating ConfigMaps. Keeping two Argo
-installations running together is not required.
+The final state has **one owner per setting**: the private chart supplies supported
+CR inputs, the operator generates its runtime/ConfigMaps, and the operator-managed
+Argo application controller reconciles Applications and their workloads. Scaling
+down the old runtime does not by itself transfer those ownership relationships.
 
-| Option | When to use it | Evidence in this PR |
-| --- | --- | --- |
-| Clean replacement | Prefer when downtime/deletion is approved and complete bootstrap/recovery inputs are ready; existing runtime identities may intentionally change | Preparation requirements below, not an implemented or validated replacement runbook |
-| In-place handoff | Use when the existing instance and resource identities must remain | Optional procedure/components below; validated on disposable MC and region |
+| Stage | Required result |
+| --- | --- |
+| 1. Readiness | Meet the target's required configuration, functionality, artifact and access prerequisites; preserve backwards compatibility with existing non-operator Argo until cutover |
+| 2. Old runtime offline | Declaratively scale the old owning workloads to zero and observe their controllers inactive; preserve Applications, shared resources and tracking state |
+| 3. Operator-managed takeover | Release competing configuration/seed writers, verify intended tracking identity and ownership, and only then let the new controller set reconcile the retained resources |
+| 4. Acceptance | Verify required settings, resource tracking, root continuity, application behavior and applicable login/notification gates; observe persistence through reconciliation/restart |
+| 5. Later cleanup | Keep legacy-only workloads inactive until acceptance; reused objects must already be released from old management; review removal separately |
 
-For a clean replacement, first review the exact old resources approved for
-deletion, the pinned new instance/settings/artifact inputs, and a bootstrap/recovery
-path that works **without the old Argo runtime**. The private chart alone is not
-a bootstrap mechanism if Argo is unavailable. Retired trial seeds cannot recreate
-the instance on their own.
+### Readiness and identity
 
-Include ownerReferences, finalizers, garbage-collection and prune effects in the
-retained/deleted-resource review; do not assume a Secret or root resource survives
-just because it was not named in the deletion list. Do not strip finalizers as a
-shortcut.
+Inventory the old and new controllers, sources, resource identities, annotations,
+owners and finalizers. Pin compatible operator/CRDs and complete per-target CR
+settings, repository access, external credential delivery and bootstrap/recovery
+inputs. The private chart cannot bootstrap itself without a running Argo instance;
+the replacement must not depend on the old runtime remaining active.
+Identify the independent bootstrap/recovery executor in the target plan. Complete
+any protection or source changes that require the old Argo before stopping it;
+remaining steps need an independent executor, not a now-inactive Argo Application.
+Establish pruning safeguards before activation: retained Applications may already
+request automatic pruning, so a check after the new controller starts is too late.
 
-Preserve namespace/root resources, shared CRDs, ESO stores/Secrets, metadata/repo
-access and the region platform API route; do not treat replacement approval as
-permission to delete a namespace or shared APIs. Remove or release competing old
-declarations as part of the reviewed plan. Deleting the runtime does not release
-a surviving Config Sync seed owner or stop an old chart writing ConfigMaps.
+Keep forward configuration backwards compatible with existing/unmigrated
+non-operator targets. Test both chart modes and the existing Argo e2e path; its disabled
+IAP/Dex settings do not prove organizational login. Actual IAP login and GitHub
+notification delivery remain separate readiness gates, not consequences of a
+successful configuration render or Synced status.
 
-Execute only a separately approved, target-specific plan and repeat the required
-configuration/behavior/persistence checks. Productized bootstrap/rebuild and full
-recovery testing remain GCP-1280/GCP-1288 work; this guide supplies no teardown
-commands or claim of completed clean-replacement validation.
+The meeting requirement for the "same identifier" needs explicit preflight checks:
+capture the tracking method, any installation identifier, application identities
+and tracking annotations, and verify the intended equivalents in the new instance
+before enabling pruning. Review runtime/service names and Secret collisions too;
+the trial name `gitops` is not a production naming decision. A recreated Kubernetes
+object cannot retain its old UID; distinguish Argo tracking identity from UID
+continuity of resources retained in place. Adoption must be observed, not assumed.
+Stop on unexpected tracking/owner mismatches rather than rewriting identifiers to
+force apparent adoption.
 
-## Optional in-place handoff
+### Scale down the old control loops
 
-This is the identity-preserving path, not a mandatory sequence for every new
-installation. The supplied components do not install a second Argo runtime.
+The intent of "remove/nuke the old Argo" here is **take it offline**, not delete
+the namespace or managed workloads. Scale owning Deployments/StatefulSets rather
+than a child ReplicaSet that its Deployment can restore. Inventory all old writers,
+especially application/ApplicationSet controllers and notifications; stopping only
+the UI server does not stop application reconciliation. Existing bootstrap source
+uses a StatefulSet for the application controller and Deployments for other roles.
 
-The validated operator-managed trials started with two bootstrap seeds overlapping
+Config Sync reconciles continuously, not only during initial bootstrap. Use
+reviewed target-specific source inputs so Config Sync, an HPA or another owner
+does not restore the old replicas. Observe zero replicas/no old reconciliation
+before the new application controllers act on the shared resources. Operator/CRD
+preparation must not accidentally activate a second competing controller set.
+If the operator will reuse a scaled-down Deployment/StatefulSet identity, release
+the old declarative owner with the appropriate prune/detach safeguards before the
+operator activates it. Do not leave Config Sync enforcing zero on that same
+object. Distinguish these reused objects from legacy-only workloads kept at zero.
+
+Isolating changes from HyperShift-backed development clusters and validating on a
+development All-in-One were discussed, not executed or authorized by these notes.
+Do not change shared bootstrap sources or disable
+Config Sync broadly. If a temporary pause is chosen, separately approve the exact
+targets/writers, scope and resume conditions, and verify convergence after resume.
+
+### Transfer, verify, then clean up
+
+Preserve Applications, namespace/root resources, shared CRDs, ESO stores/Secrets,
+metadata/repo access and the region platform API route. Release old chart or
+Config Sync configuration writers before the new CR inputs take over. The
+operator owns its runtime/configuration; its application controller, not the
+operator alone, takes over application workload reconciliation.
+
+Use the supporting seed procedure below only where the target has those competing
+owners. Verify ownership/tracking without unintended pruning, required settings,
+root/private-repo continuity and target-specific acceptance. Keep the old runtime
+inactive; any later deletion needs an ownerReferences/finalizer/garbage-collection
+and prune review. Never strip finalizers as a shortcut. This guide provides no
+blanket deletion command or already-validated execution script for the new cutover.
+
+## Supporting seed ownership handoff
+
+These optional components handle a specific configuration-ownership overlap; they
+do not scale old Argo down, install a second runtime or automatically adopt all
+resources. The October 13 operator-managed trials started with two seeds overlapping
 day-two configuration: `ArgoCD/argocd/gitops` and the Dex seed
 `ConfigMap/argocd/argocd-cm`. The private chart will own supported ArgoCD and
 NotificationsConfiguration CR inputs, not directly generated ConfigMaps.
@@ -133,6 +183,12 @@ instance seed, its ownership still needs release before private-chart adoption.
 Do not blindly replay an old sparse seed over current required settings.
 Productized bootstrap/rebuild orchestration is separate GCP-1280/GCP-1288 work.
 
+Retaining old definitions at zero is not an automatic rollback. Do not scale old
+application controllers back up while new controllers are reconciling the same
+resources. Stop for a reviewed recovery plan that coordinates controller activity,
+configuration, tracking and source ownership; no automatic reverse cutover is
+implemented here.
+
 Before ownership release, a reviewed reversal may restore the preceding protected
 inputs. After release, keep the retained resources protected and stop for an
 exact-spec Config Sync reclaim plan if needed; never blindly replay an old seed.
@@ -150,9 +206,11 @@ Offline render tests verify preservation of seed specs/UID-independent resource
 identities and existing annotations. The October 13 disposable trials additionally
 verified live release/prune transitions, retained settings through two subsequent
 Argo Application reconciliations and a relevant manager restart on each cluster,
-and representative health/watch behavior **for the in-place path**. They do not
-validate deleting/recreating Argo or rebuilding the cluster. These are bounded,
-dated observations; repeat the reviewed gates for another target or artifact. Existing engineering
+and representative health/watch behavior **for configuration ownership on existing
+operator-managed instances**. They do not demonstrate the complete old non-operator
+Argo scale-to-zero → operator-managed takeover sequence, deleting/recreating Argo,
+or rebuilding the cluster. These are bounded, dated observations; the agreed runtime
+cutover needs its own target-specific evidence. Existing engineering
 artifacts are not a certified supported release. Configuration preservation does
 not establish authenticated IAP login, real GitHub delivery or complete rebuild
 recovery. Team PR review/merge and applicable DoD remain separate from trial proof.
