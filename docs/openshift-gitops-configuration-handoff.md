@@ -1,20 +1,60 @@
-# GCP-1282: Config Sync to operator configuration ownership handoff
+# GCP-1282: Operator configuration ownership and cutover options
 
-**Opt-in procedure; no default rollout.** The reviewed transition completed on
+**Opt-in guidance; no default rollout.** The reviewed in-place transition completed on
 disposable MC and region trials on October 13, 2026; see the
 [sanitized validation record](openshift-gitops-configuration-validation.md).
-Companion chart/matrix/tests: `gcp-hcp-infra/docs/ARGOCD_OPERATOR_CONFIGURATION.md`. Publish
-and pin both repository changes before proposing a live transition. The existing
+The companion implementation [PR #2315](https://github.com/openshift-online/gcp-hcp-infra/pull/2315)
+has merged; chart/matrix/tests are documented in
+`gcp-hcp-infra/docs/ARGOCD_OPERATOR_CONFIGURATION.md`. Pin reviewed bootstrap and
+chart revisions before proposing a live transition. The existing
 `bootstrap/kustomization.yaml` does not reference these opt-in components;
 ordinary bootstrap output is unchanged.
 
-An operator-managed migration starts with two bootstrap seeds that overlap
+## Choose a cutover
+
+The required design is **one owner per setting**, with the private chart supplying
+supported CR inputs and the operator generating ConfigMaps. Keeping two Argo
+installations running together is not required.
+
+| Option | When to use it | Evidence in this PR |
+| --- | --- | --- |
+| Clean replacement | Prefer when downtime/deletion is approved and complete bootstrap/recovery inputs are ready; existing runtime identities may intentionally change | Preparation requirements below, not an implemented or validated replacement runbook |
+| In-place handoff | Use when the existing instance and resource identities must remain | Optional procedure/components below; validated on disposable MC and region |
+
+For a clean replacement, first review the exact old resources approved for
+deletion, the pinned new instance/settings/artifact inputs, and a bootstrap/recovery
+path that works **without the old Argo runtime**. The private chart alone is not
+a bootstrap mechanism if Argo is unavailable. Retired trial seeds cannot recreate
+the instance on their own.
+
+Include ownerReferences, finalizers, garbage-collection and prune effects in the
+retained/deleted-resource review; do not assume a Secret or root resource survives
+just because it was not named in the deletion list. Do not strip finalizers as a
+shortcut.
+
+Preserve namespace/root resources, shared CRDs, ESO stores/Secrets, metadata/repo
+access and the region platform API route; do not treat replacement approval as
+permission to delete a namespace or shared APIs. Remove or release competing old
+declarations as part of the reviewed plan. Deleting the runtime does not release
+a surviving Config Sync seed owner or stop an old chart writing ConfigMaps.
+
+Execute only a separately approved, target-specific plan and repeat the required
+configuration/behavior/persistence checks. Productized bootstrap/rebuild and full
+recovery testing remain GCP-1280/GCP-1288 work; this guide supplies no teardown
+commands or claim of completed clean-replacement validation.
+
+## Optional in-place handoff
+
+This is the identity-preserving path, not a mandatory sequence for every new
+installation. The supplied components do not install a second Argo runtime.
+
+The validated operator-managed trials started with two bootstrap seeds overlapping
 day-two configuration: `ArgoCD/argocd/gitops` and the Dex seed
 `ConfigMap/argocd/argocd-cm`. The private chart will own supported ArgoCD and
 NotificationsConfiguration CR inputs, not directly generated ConfigMaps.
 Simply adding a private CR writer without releasing the public seed is unsafe.
 
-## Supported release mechanism
+### Supported release mechanism
 
 Google documents both [preventing deletion and stopping management without
 deleting objects](https://cloud.google.com/kubernetes-engine/enterprise/config-sync/docs/how-to/managing-objects).
@@ -34,7 +74,7 @@ and their operator controllers must continue reconciling required settings.
 Removing a managed resource without release/detach would prune it. A missing
 ArgoCD CR can garbage-collect the runtime; never use deletion to clear OutOfSync.
 
-## Candidate assembly and checks
+### Candidate assembly and checks
 
 These components are specifically scoped to the trial instance `gitops` in
 `argocd`. That is not a production naming decision. Customize and independently
@@ -82,15 +122,19 @@ UIDs. Do not remove mutation-ignore to force a sparse seed over the full CM.
 Keep the operator and root bootstrap resources under Config Sync. This preserves
 the Terraform → Fleet Config Sync → Argo CD chain, but releasing the instance
 means Config Sync cannot recreate that instance on a new cluster from the
-released stage. Use the original protected installation seed for rebuilds and
-repeat the approved handoff. Productized bootstrap/rebuild orchestration is
-separate GCP-1280/GCP-1288 work.
+released stage. Review protected installation-seed or exact-spec reclaim inputs
+before replacement/rebuild. If bootstrap creates another Config Sync-owned
+instance seed, its ownership still needs release before private-chart adoption.
+Do not blindly replay an old sparse seed over current required settings.
+Productized bootstrap/rebuild orchestration is separate GCP-1280/GCP-1288 work.
 
 Before ownership release, a reviewed reversal may restore the preceding protected
 inputs. After release, keep the retained resources protected and stop for an
 exact-spec Config Sync reclaim plan if needed; never blindly replay an old seed.
 After adoption, fix/roll back the private CR inputs rather than reintroducing
-competing ConfigMaps or the old managed seed. Reverse ownership transfer needs
+competing ConfigMaps or the old managed seed. Setting `operator.enabled=false`
+is not a rollback: protected CRs continue reconciling while the chart resumes
+direct ConfigMap writes. Reverse ownership transfer needs
 its own protection, Argo tracking release, Config Sync reclaim and exact-spec
 review. No reset/teardown, Route CRD removal, or shared-state Terraform action is
 authorized by this procedure.
@@ -101,8 +145,9 @@ Offline render tests verify preservation of seed specs/UID-independent resource
 identities and existing annotations. The October 13 disposable trials additionally
 verified live release/prune transitions, retained settings through two subsequent
 Argo Application reconciliations and a relevant manager restart on each cluster,
-and representative health/watch behavior. These are bounded, dated observations;
-repeat the reviewed gates for another target or artifact. Existing engineering
+and representative health/watch behavior **for the in-place path**. They do not
+validate deleting/recreating Argo or rebuilding the cluster. These are bounded,
+dated observations; repeat the reviewed gates for another target or artifact. Existing engineering
 artifacts are not a certified supported release. Configuration preservation does
 not establish authenticated IAP login, real GitHub delivery or complete rebuild
 recovery. Team PR review/merge and applicable DoD remain separate from trial proof.

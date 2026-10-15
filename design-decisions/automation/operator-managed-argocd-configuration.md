@@ -4,14 +4,21 @@
 
 **Date**: 2026-10-13
 
-**Status**: Proposed for team review; disposable validation complete, no rollout approval.
+**Status**: Proposed for team review; disposable in-place validation complete, no rollout approval.
 
 ## Decision
 
 For operator-managed Argo CD, declare required HCP configuration through supported
 ArgoCD and NotificationsConfiguration inputs rather than competing generated
-ConfigMap writers. Transfer bootstrap ownership through separately observed
-protection, release and adoption gates; keep operator mode opt-in per target.
+ConfigMap writers. Keep operator mode opt-in per target. This ownership contract
+is required regardless of how the old runtime is replaced or adopted.
+
+Prefer a **clean replacement** when downtime/deletion is explicitly approved and
+complete bootstrap/recovery inputs are ready. Use the **optional in-place handoff**
+when retaining the existing instance and resource identities matters. Neither
+option requires running old and new Argo installations together. The in-place
+path was validated on disposable MC/region trials; a complete clean-replacement
+or rebuild procedure was not validated by those trials.
 
 ## Context
 
@@ -19,9 +26,11 @@ protection, release and adoption gates; keep operator mode opt-in per target.
   ConfigMap settings. Ready runtimes and Healthy Applications did not establish
   equivalent custom health, update filters, auth or notification configuration.
 - **Constraints:** Preserve the Terraform → Fleet Config Sync → Argo CD boundary,
-  bootstrap/root identities, disabled-admin baseline and external credential
-  ownership. Never use drift suppression, operator disablement or local users to
-  conceal a conflicting owner. MC and region require independent inputs/review.
+  bootstrap/root chain, shared resources, disabled-admin baseline and external
+  credential ownership. Any runtime deletion or identity replacement must be
+  explicitly scoped and approved. Never use drift suppression, operator disablement
+  or local users to conceal a conflicting owner. MC and region require independent
+  inputs/review.
 - **Assumptions:** The selected operator/CRDs expose the inventoried supported
   fields. Revalidate contract and behavior for another artifact; trial images are
   not official signed/support certification. An unsupported required setting is
@@ -34,7 +43,9 @@ move Kubernetes resources into Terraform or add a separate infrastructure lane.
 ## Alternatives Considered
 
 1. **Supported CR inputs with one owner (selected):** Private day-two Argo inputs
-   own the existing CRs; operator controllers generate the ConfigMaps.
+   own the adopted or newly bootstrapped CRs; operator controllers generate the
+   ConfigMaps. Clean replacement and in-place handoff are cutover choices within
+   this model, not competing ownership architectures.
 2. **Continue direct Helm/Config Sync CM writes:** Rejected; concurrent writers
    produce partial-sync fights and values that do not survive reconciliation.
 3. **Ignore drift or stop operator reconciliation:** Rejected; green status would
@@ -57,17 +68,23 @@ Final owners:
 | Inputs/resources | Declarative owner | Runtime reconciler |
 | --- | --- | --- |
 | Operator/CRDs, namespace, bootstrap ESO/metadata/repository/root resources | Fleet Config Sync bootstrap | Existing bootstrap controllers |
-| Existing ArgoCD spec | Private argocd-config chart after reviewed Config Sync release | Argo CD operator |
-| Existing default NotificationsConfiguration spec | Private argocd-config chart | NotificationsConfiguration controller |
+| ArgoCD spec, adopted or newly bootstrapped | Private argocd-config chart after release of any competing Config Sync seed owner | Argo CD operator |
+| Default NotificationsConfiguration spec | Private argocd-config chart | NotificationsConfiguration controller |
 | Generated Argo CD ConfigMaps | No direct chart/bootstrap writer | Respective operator controllers |
 | Registry/OAuth/GitHub credential values | Existing approved external secret path | ESO and existing Secret owner |
 
-The opt-in
-[handoff procedure](../../docs/openshift-gitops-configuration-handoff.md) requires
+The [cutover guide](../../docs/openshift-gitops-configuration-handoff.md) separates
+replacement prerequisites from the optional, validated in-place procedure. For
+the latter, the supplied opt-in components protect existing identities:
 detach protection before release, including the mutation-ignore CM bridge;
-live metadata/inventory removal before CR adoption; and value/owner verification
-before guarded retirement of stale CM tracking and released seed declarations.
-Do not collapse these into one source update.
+observed metadata/inventory removal before CR adoption; and value/owner checks
+before guarded retirement of stale tracking and seed declarations. Do not collapse
+those in-place stages into one source update or require them for every new install.
+
+Deleting the old runtime does not resolve a competing declarative owner. If a
+replacement's bootstrap still manages an instance seed or generated ConfigMaps,
+review its ownership release before the private CR inputs take over. A replacement
+must also bootstrap without depending on the Argo runtime it removes.
 
 ## Consequences
 
@@ -76,12 +93,15 @@ Do not collapse these into one source update.
 - Required configuration has one declarative input owner and supported runtime
   generation, with mapping/precedence tests and explicit per-cluster inventory.
 - Legacy/default deployment behavior stays unchanged until reviewed target opt-in.
-- Protected identities/root continuity and observed gates limit pruning risk.
+- The optional in-place path protects existing identities/root continuity; a
+  separately approved replacement can intentionally recreate the old runtime.
 
 ### Negative
 
-- Transfer requires coordinated public/private revisions and observed stages;
-  Git source convergence alone is insufficient proof of ownership or behavior.
+- In-place transfer requires coordinated public/private revisions and observed
+  stages. Clean replacement instead accepts downtime and requires complete
+  bootstrap/recovery inputs. Neither Git convergence nor deletion alone proves
+  correct ownership or behavior.
 - Releasing the instance removes automatic Config Sync recreation on a fresh
   cluster. Protected-seed rebuild/reclaim orchestration remains GCP-1280/GCP-1288
   work; do not reverse ownership by blindly replaying an old spec.
@@ -105,7 +125,9 @@ Do not collapse these into one source update.
 - Compare rendered identity/prune effects, served schemas and all required values;
   verify actual behavior and persistence, not only readiness/key presence.
 - Guard one-time metadata retirement with fresh UID/RV/owner/value tests; preserve
-  data, lifecycle/operator metadata and adopted-CR prune/delete protections.
+  data, lifecycle/operator metadata and adopted-CR prune/delete protections when
+  using the in-place path. Clean replacement needs an independently reviewed
+  retained/deleted-resource inventory, not a namespace/shared-CRD wipe.
 - Record stop/recovery boundaries. After adoption, roll forward or restore reviewed
   CR inputs; reintroducing legacy CM writers is not a safe rollback.
 - No Terraform/IAM, artifact upgrade or default bootstrap replacement is part of

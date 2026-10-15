@@ -3,7 +3,7 @@
 **Evidence date: October 13, 2026.** This records bounded configuration ownership
 validation, not a production rollout or story closure. The team implementation
 defaults to legacy mode; no environment is enabled by publishing these changes.
-See the [handoff procedure](openshift-gitops-configuration-handoff.md) and
+See the [cutover options and optional in-place handoff](openshift-gitops-configuration-handoff.md) and
 [proposed ownership decision](../design-decisions/automation/operator-managed-argocd-configuration.md).
 The companion settings matrix/tests live in
 `gcp-hcp-infra/docs/ARGOCD_OPERATOR_CONFIGURATION.md` and
@@ -12,8 +12,12 @@ The companion settings matrix/tests live in
 ## Scope and provenance
 
 Reviewed backports were delivered through separate observed revisions on existing
-personal trial branches. This is not a claim that the default team bootstrap
-installs the operator or that the draft implementation is already merged.
+personal trial branches. This records the **in-place ownership handoff**, not a
+complete clean-replacement/rebuild validation. The default team bootstrap does
+not install the operator as a result of these changes. The companion implementation
+[PR #2315](https://github.com/openshift-online/gcp-hcp-infra/pull/2315) subsequently
+merged on October 14 as `fba968fac27d7dcd62aea60beabecf9969d3f3ce`; that does not
+change the exact trial revisions and evidence below.
 
 | Source | MC final revision | Region final revision |
 | --- | --- | --- |
@@ -33,7 +37,9 @@ signed/supported release validation. No image upgrade occurred.
 ## Ownership transition results
 
 Each cluster followed protection → Config Sync release → existing-CR adoption →
-guarded tracking/seed retirement. Gates were observed before proceeding.
+guarded tracking/seed retirement. Gates were observed before proceeding. This
+validated sequence remains an optional cutover when identities must be retained;
+it is not a requirement to preserve the old runtime in every future installation.
 
 | Gate | Observed on both clusters |
 | --- | --- |
@@ -107,8 +113,10 @@ uninterrupted manager availability. The MC remained unchanged during region work
 1. Independently pin the target's sources/artifacts/CRDs and record required
    settings, original resource identities, owners, tracking, inventory and runtime
    status. Never copy MC identities or credentials to a region.
-2. Use the handoff procedure's separate render/prune/ownership gates. Run the
-   offline suite with both served CRDs and the companion component checkout.
+2. To repeat this in-place validation, use the handoff procedure's separate
+   render/prune/ownership gates. A clean replacement requires a separately reviewed
+   bootstrap/deletion plan and new evidence; these trial results do not substitute
+   for it. Run the offline suite with both served CRDs and companion components.
 3. For runtime health, execute `argocd admin settings resource-overrides health`
    against representative file fixtures and a captured live non-secret CM;
    explicitly disable cluster-settings reads. Ready pods/key presence alone do
