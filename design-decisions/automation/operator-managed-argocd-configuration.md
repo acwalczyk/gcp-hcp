@@ -20,6 +20,15 @@ backwards compatible with existing/unmigrated non-operator Argo targets; keep
 operator mode opt-in per target. Quiescing the old runtime and releasing old
 configuration writers are separate, required checks.
 
+**No OLM at either layer.** Render pinned operator/CRD Helm charts into ordinary
+Kubernetes manifests in Git; Fleet Config Sync delivers them to the cluster. The
+operator then directly reconciles Argo CD through CR inputs. Neither installation
+of the operator nor its management of Argo CD uses Operator Lifecycle Manager
+(OLM), OLM Subscriptions, CatalogSources or InstallPlans. Operator-managed does
+not mean OLM-managed. Availability/support and provenance of the selected release's
+Helm artifacts still require separate verification; this is not a claim about
+every GitOps release or a standalone non-operator Argo chart.
+
 The October 13 trials validated configuration ownership on existing
 operator-managed instances. They did **not** validate this complete old-runtime
 scale-down and replacement sequence, organizational login, or actual notification

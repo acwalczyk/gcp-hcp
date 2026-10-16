@@ -15,6 +15,25 @@ chart revisions before proposing a live transition. The existing
 `bootstrap/kustomization.yaml` does not reference these opt-in components;
 ordinary bootstrap output is unchanged.
 
+## Installation method: no OLM
+
+**OLM is not used at either layer.** The proposed installation path is:
+
+```text
+Pinned operator/CRD Helm charts
+  → rendered Kubernetes manifests in Git
+  → Fleet Config Sync installs the operator and CRDs
+  → operator directly reconciles Argo CD from supported CR inputs
+```
+
+This does not install Operator Lifecycle Manager (OLM), use OLM Subscriptions,
+CatalogSources or InstallPlans to manage the operator, or have the operator invoke
+OLM to deploy Argo CD. Helm packages the operator; the operator manages Argo CD
+directly. This is not a proposal for a standalone, non-operator Argo Helm chart.
+Verify the selected release's chart availability, support and provenance
+separately; the engineering trials are not release qualification. Publishing this
+guide does not change the default bootstrap or install anything.
+
 ## Agreed replacement sequence
 
 The final state has **one owner per setting**: the private chart supplies supported
