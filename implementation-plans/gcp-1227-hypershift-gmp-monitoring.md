@@ -6,7 +6,7 @@
 
 **Target repository**: `github.com/openshift/hypershift` (upstream — requires HyperShift maintainer review/sign-off)
 
-> **Status**: Proposed runtime design pending maintainer sign-off. GCP-1292 foundation is implemented locally on `acwalczyk/GCP-1292-monitoring-api-group-plumbing`; validation evidence and limitations are recorded in the HyperShift working plan `gmp-native-monitoring-revised-plan.md`. Phase 0 remains historical two-target feasibility evidence. Runtime reconciliation and the operator etcd/KAS slice are pending. Older line-number anchors below are historical and can drift.
+> **Status**: Proposed runtime design pending maintainer sign-off. GCP-1292 foundation, including the reproducible API maintenance workflow, is implemented and validated locally on `acwalczyk/GCP-1292-monitoring-api-group-plumbing`; validation evidence and limitations are recorded in the HyperShift working plan `gmp-native-monitoring-revised-plan.md`. Phase 0 remains historical two-target feasibility evidence. Runtime reconciliation and the operator etcd/KAS slice are pending. Older line-number anchors below are historical and can drift.
 
 ## Overview
 
@@ -53,7 +53,7 @@ The next code slice uses the local API-only foundation and is limited to etcd an
 
 1. Select and test the reconciliation architecture before adding assets. Backend-aware per-workload handling and centralized GMP reconciliation are candidates; neither is approved or implemented by the foundation.
 2. Define inactive-backend exclusion before decoding and before update/delete/status/watch operations. Monitoring errors must be visible and retried without stopping core workloads; explicitly define HCP availability/upgrade policy, ownership-checked cleanup in both directions, and recovery after CRD/RBAC repair.
-3. Add typed etcd/KAS resources using `support/gmpmonitoring`, with the validated pod discovery, ports, TLS client credentials and CA-only Secrets.
+3. Implement the Phase 4 writer RBAC prerequisite for the CPO and the HyperShift operator's authority to grant it, then add typed etcd/KAS resources using `support/gmpmonitoring`, with the validated pod discovery, ports, TLS client credentials and CA-only Secrets.
 4. Preserve MetricSet behavior through a tested relabel translator, rejecting unsupported actions and protected labels.
 5. Implement GMP-only collector Secret access and NetworkPolicy, credential/CA rotation triggers, and tests of both backend transitions.
 6. Validate the resulting operator path and live scrape evidence under GCP-1293/GCP-1295. Historical Phase 0 manual YAML does not prove these operator behaviors.
@@ -94,7 +94,7 @@ Passing the thin slice proves those two targets only. Audit the remaining discov
 | Monitoring label helper | `support/metrics/labels.go:8-10` | `HyperShiftMonitoringLabel`. |
 | CPO CLI | `control-plane-operator/main.go:321-361` | `NewStartCommand`, flags block. |
 | Install options | `cmd/install/install.go:87-149` | `Options` struct (`RHOBSMonitoring` :142, `PlatformMonitoring` :103, `MetricsSet` :139). |
-| GMP CRD Go types | `support/gmpmonitoring` | Locally implemented API-only extraction pinned to v0.17.2 / `058752ec791edefba5c42486eb9237562c3f0d29`; 29 data types total, including PodMonitoring, Rules, their lists and all required nested spec/status types. No full operator dependency or existing-version changes. |
+| GMP CRD Go types | `support/gmpmonitoring` | Local foundation snapshot: v0.17.2 / `058752ec791edefba5c42486eb9237562c3f0d29`, 29 data types including PodMonitoring, Rules, their lists and required nested spec/status types. Current source pin is maintained in `hack/gmp-api-source/go.mod`; generated `upstream.sha256` records provenance. No full operator dependency or existing-version changes. |
 | `AllMonitoringScheme` | `support/api/scheme.go` | Additive GMP types alongside CoreOS; RHOBS additionally registered when RHOBS is selected. A decode helper, not the isolation mechanism. |
 
 ## Architecture
@@ -151,13 +151,32 @@ Tests cover parser defaults/errors, both install rejection regressions, RHOBS co
 
 ### Phase 2 — Maintained GMP API-only package (local foundation implemented)
 
-`support/gmpmonitoring` contains upstream-derived PodMonitoring, Rules, their lists, and all required nested spec/status data. The source is prometheus-engine v0.17.2 at immutable revision `058752ec791edefba5c42486eb9237562c3f0d29`. This is a schema/serialization reference, not blanket GKE production compatibility.
+`support/gmpmonitoring` contains upstream-derived PodMonitoring, Rules, their lists and required nested spec/status data. The source version is selected in the download-only `hack/gmp-api-source/go.mod`; its `go.sum` verifies module inputs, and generated `support/gmpmonitoring/upstream.sha256` records the resolved version, immutable upstream commit, module checksums and input file checksums. The snapshot is a schema/serialization reference, not blanket GKE production compatibility.
 
-`hack/update-gmp-api.sh` verifies source revision/checksums in an isolated input module, extracts the data closure with a standard-library Go AST tool, copies pinned upstream CRD fixtures and regenerates deepcopies using the repository controller-gen. `make generate` regenerates deepcopies offline. Upstream headers, license, comments, JSON tags and generation markers are preserved; operator methods, admission, Secret resolution, collector/exporter runtime and Prometheus config construction are excluded.
+`hack/update-gmp-api.sh` downloads the selected source in isolation. The Go AST extractor discovers upstream API source files, follows the supported type closure and rejects unexpected runtime imports. It preserves upstream headers, license, comments, JSON tags and generation markers, copies pinned CRD fixtures and regenerates deepcopies using the repository's pinned controller-gen. Operator methods, admission, Secret resolution, collector/exporter runtime and Prometheus config construction are excluded. HyperShift's root module, existing dependency versions, vendor directory and Prometheus replacement remain unchanged. ClusterPodMonitoring, ClusterRules and GlobalRules remain deferred pending an explicit discovery or rule-scope requirement.
 
-No existing dependency versions or Prometheus replacement change; no root-module Google dependency is added. Only the two orphaned Google go.sum entries from the earlier experiment were removed. ClusterPodMonitoring, ClusterRules and GlobalRules are deferred until an explicit discovery or cross-namespace rule requirement is selected.
+#### Maintenance ownership and workflow
 
-Tests exercise actual HyperShift serializers, objects and lists with spec/status, nested deepcopy isolation, fresh-process registration, and emitted objects against pinned v1 OpenAPI schemas with negative controls. Offline schema checks do not execute CEL or Google admission/runtime checks; live target CRD compatibility remains a later gate.
+The GCP HCP team owns the snapshot, extraction tooling and compatibility validation. `gcp-reviewers` review package and tooling changes through the normal HyperShift review process. The canonical runbook is HyperShift's `support/gmpmonitoring/README.md`, currently part of the local GCP-1292 change; use the published implementation revision when available. Keep detailed operational instructions there rather than maintaining a second runbook here.
+
+From the HyperShift repository root, with Go, Python 3 and Make available:
+
+```sh
+make gmp-sync
+make verify-gmp-sync
+```
+
+An unchanged source pin must reproduce the snapshot without differences. Verification regenerates into temporary storage and fails on missing, different or unexpected generated files without rewriting tracked files. CI runs verification when GMP inputs, tooling, outputs or relevant dependency/tool versions change. Ordinary `make generate` continues to regenerate deepcopies offline.
+
+For a source update, review relevant API/schema changes for the supported environments, change the prometheus-engine requirement in `hack/gmp-api-source/go.mod`, regenerate, verify and run the focused tests documented in the canonical runbook. Review the generated diff and include compatibility evidence in the update PR. Expected changes are limited to the source pin/checksums, provenance, API types, deepcopies, license and schema fixtures. Do not hand-edit generated files; unexpected runtime dependencies or extraction failures require owning-team review. How candidate updates are detected remains open; no fixed review cadence or release-monitoring automation is established. A new operator or collector release alone does not require a snapshot update.
+
+#### Validation and compatibility
+
+Local validation covers reproducible regeneration from existing and fresh module caches, verification rejecting altered/missing/unexpected generated files and missing input checksums, and an isolated source-pin update exercise. Focused race tests, the full unit suite and lint passed locally. This records local foundation evidence, not merged or deployed behavior.
+
+Package tests exercise actual HyperShift serializers, objects and lists with spec/status, nested deepcopy isolation, fresh-process registration and emitted examples against pinned v1 OpenAPI schemas with negative controls. Fixture CRDs are test inputs; HyperShift does not install them.
+
+The copied source version does not need to numerically match the deployed GMP image. Compatibility depends on the fields HyperShift emits and the schemas and behavior supported by deployed components. Record the GKE version, GMP operator image and validation performed for the intended environments. Offline schema checks do not execute CEL or Google admission/runtime checks, and do not establish live admission, scraping or rule-evaluation compatibility. The supported GKE/GMP matrix and live validation remain later gates.
 
 ### Runtime design gate (before Phases 3–8)
 
@@ -181,12 +200,14 @@ A small, well-tested translator is the reusable core the manifests depend on.
 
 After the runtime design gate, add GMP coverage for each current CPO monitor. ServiceMonitor and PodMonitor both map to PodMonitoring, and same-pod endpoints may be consolidated only when discovery/ports/auth remain equivalent. Asset names such as gmp-podmonitoring.yaml are examples; the selected lifecycle design determines their reconciliation path.
 
+- **Writer RBAC prerequisite**: grant the CPO namespaced access to `monitoring.googleapis.com` resources `podmonitorings` and `rules`, with `get`, `list`, `watch`, `create`, `update`, `patch` and `delete`. Update the CPO Role (`v2/assets/control-plane-operator/role.yaml` and its adapter) and the HyperShift operator ClusterRole (`cmd/install/assets/hypershift_operator.go`) so the operator has the corresponding authority to grant that Role without broad `escalate` permissions. The collector Secret reader Role in Phase 4.5 serves a different principal and does not authorize these writes. Extend permissions for cluster/global rule resources only if the Phase 5 scope audit requires them.
+- **Permission lifecycle**: under the selected backend-transition design, establish writer permissions before creating GMP resources. When returning to CoreOS, retain the CPO permissions and the HyperShift operator's grant authority until owned GMP resources have been cleaned up, then restore the steady CoreOS policy. Default/RHOBS steady-state permissions remain unchanged; do not revoke access before cleanup completes.
 - Add `gmp-podmonitoring.yaml` (translating a `ServiceMonitor` **or** `PodMonitor` — both become `PodMonitoring`; a ServiceMonitor's Service→endpoints discovery must be re-expressed as a pod label selector that reproduces the same target set) and `gmp-rules.yaml` (from the recording-rules PrometheusRule) alongside existing assets; `//go:embed */*.yaml` makes assets available, but inactive-backend loading and API/status/watch isolation still require the selected runtime design.
 - **Order of implementation** (highest risk first, per Phase 0): etcd → kube-apiserver → remaining ServiceMonitor components → PodMonitor components → recording rules.
 - Each adapt function: translate discovery (Service→pod label selector — audit that pod labels reproduce the same target set), ports, `tlsConfig`→`tls` (Secret refs), auth, cluster-identity labels, and MetricSet relabelings (via Phase 3 translator).
 - Per-target audit checklist recorded on the ticket: discovery mapping, port naming, TLS/auth, relabelings, cluster-identity labels.
 
-**Tests**: golden GMP resources per MetricSet, discovery/TLS/auth for etcd/KAS, unchanged default/RHOBS output, and no inactive-backend decoding or API/watch/status operations. Add explicit monitoring error/retry and both-direction cleanup/recovery tests under the agreed availability/upgrade policy.
+**Tests**: golden GMP resources per MetricSet, discovery/TLS/auth for etcd/KAS, unchanged default/RHOBS output, and no inactive-backend decoding or API/watch/status operations. Assert the rendered CPO writer permissions and the HyperShift operator's grant authority; use an API-server-backed test with the intended identities to verify Role granting and GMP create/update/delete authorization, since fake clients do not enforce RBAC. Cover grants before resource creation and cleanup before permission revocation. Add explicit monitoring error/retry and both-direction cleanup/recovery tests under the agreed availability/upgrade policy.
 
 ### Phase 4.5 — CA Secrets & Collector RBAC (GMP-gated)
 
@@ -232,7 +253,9 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 
 - Repo-level Go test that extracts the set of scrape targets from all **endpoint-bearing** CoreOS monitors (the `ServiceMonitor`/`PodMonitor` CPO YAML assets + the two endpoint-bearing install constructors) — keyed by `(component, pod/target selector, port, metrics path, MetricSet)` — and the equivalent set from all GMP `PodMonitoring.endpoints`, then asserts the GMP set **covers** the CoreOS set. This passes whether one `PodMonitoring` covers one old monitor or three. `PrometheusRule`/GMP `Rules` resources expose **no** scrape endpoints and are deliberately excluded from this coverage set.
 - **Rules are checked separately** (not as scrape targets): assert each CoreOS `PrometheusRule` group (the CPO recording rule + the management-level recording/alerting rules) has a corresponding GMP rule group at the audited namespace/cluster/global scope. This is a distinct assertion from endpoint coverage above, because rule resources carry no `(selector, port, path)` scrape target.
-- For `ServiceMonitor`s, normalize Service-based discovery to the backing pod target set before comparing, so a Service→pod selector translation that silently narrows or widens coverage is caught. Normalization is **static** (no live cluster): resolve the ServiceMonitor's Service selector against the Service definitions in the same assets, map each Service `spec.selector` to the pods it fronts, and resolve named ports through the Service `port.name → targetPort → container port` chain so the key compares effective pod label selectors and concrete ports, not Service-level names. Validate the static discovery algorithm in the future parity gate (it is the one place where a hand-written GMP pod selector — e.g. `{app: etcd}` — could legitimately differ from the Service's effective selector — e.g. `{app: etcd, tier: control-plane}` — and widen the target set).
+- Build the discovery inventory **offline** from rendered and adapted monitors, Services and workload pod templates, including both YAML assets and Go constructors/reconcilers for the same HCP/platform/MetricSet configuration and component predicates. Include the kube-apiserver Service reconciled through `hostedcontrolplane/infra/infra.go` and `kas/service.go`; it is not a Service YAML asset.
+- For `ServiceMonitor`s, resolve the monitor's Service selector and namespace selection against that inventory, then map each Service `spec.selector` to the pods it fronts. If an endpoint specifies `port`, select the named Service port and resolve its backing endpoint/container port; `port` takes precedence over `targetPort`. Otherwise, resolve endpoint `targetPort` directly against selected pods' container ports by name or number. Compare effective pod targets and concrete ports with GMP endpoints, rather than assuming every monitor follows a Service-port-name chain. Fail on unresolved discovery instead of silently excluding the target.
+- Test normalization with the Go-reconciled kube-apiserver Service, named Service ports, named/numeric endpoint `targetPort`, and selector/port changes. Assert that narrowing or widening a GMP selector is detected — for example, `{app: etcd}` must not silently replace an effective selector of `{app: etcd, tier: control-plane}`. Include negative cases for missing Service or pod-port resolution.
 - **Scope**: this test guards *target-level* coverage (same pods/ports/paths scraped per MetricSet), **not** metric-level equivalence (identical keep/drop after relabeling). Relabeling correctness is covered separately by the Phase 3 translator tests and the Phase 4 per-component × MetricSet golden files. A target can be "covered" here while its relabeling drifts; golden and translator tests establish code-level coverage/relabel checks. Live metric, label and rule parity remains a cutover gate. Keep the MetricSet dimension in the target key so a target scraped under the wrong MetricSet still fails coverage.
 - Support an explicit allowlist/waiver for intentional exclusions (keyed by target, not filename) so the test is actionable, not a blanket block.
 - Fails CI when a new CoreOS monitor (or an added endpoint on an existing one) introduces a scrape target with no GMP coverage.
@@ -248,12 +271,15 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 |-------|----------|
 | Env var/validation | enum validation; RHOBS + env-var conflict across the selection-consuming binaries (install/render + CPO startup now; hypershift-operator at Phase 6); default→coreos |
 | Scheme | `AllMonitoringScheme` registers coreos + GMP; RHOBS path unchanged |
+| API snapshot reproducibility | Local foundation: source pin/checksums and generated provenance; unchanged-pin regeneration; non-writing verification rejects missing, changed or unexpected artifacts; isolated pin-update exercise; CI verification on relevant changes |
+| API data/schema | Local foundation: serializer round trips, nested deepcopy isolation and pinned OpenAPI checks with negative controls; live admission/scraping/rule evaluation remain separate compatibility gates |
 | Translation | per-action relabel translation; unsupported-action failure; MetricSet parity for etcd/KAS |
 | CPO manifests | golden files per component × MetricSet; backend selection/isolation under the agreed runtime design; TLS/auth for etcd & KAS |
+| Writer RBAC | CPO GMP resource permissions and HyperShift operator grant authority; API-server-backed authorization checks; grants before creation and cleanup before revocation; default/RHOBS steady state unchanged |
 | Install monitors | both selections render; default coreos; alerts in openshift-monitoring |
 | CA/RBAC | CA-only Secrets + collector Role/RoleBinding render GMP-gated; Secret `ca.crt` matches source ConfigMap; absent on default |
 | NetworkPolicy | GMP adds gke-gmp-system ingress; non-GMP unchanged |
-| Parity | repo-level: every CoreOS scrape target is covered by a GMP endpoint (coverage-based, not per-file twin; handles SM/PM→PodMonitoring collapse and consolidation) |
+| Parity | repo-level: every CoreOS scrape target is covered by a GMP endpoint; rendered YAML/Go discovery inventory, distinct `port`/`targetPort` semantics and selector/port drift checks (coverage-based, not per-file twin; handles SM/PM→PodMonitoring collapse and consolidation) |
 | Regression | default and `RHOBS_MONITORING=1` outputs unchanged (golden) |
 
 ## Risks & Mitigations
@@ -264,7 +290,8 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 | Service→pod discovery mismatch | missed/duplicated targets | Per-ServiceMonitor discovery audit; golden tests assert selector target set |
 | ConfigMap-based CA refs unsupported in GMP | TLS config fails | **Resolved in Phase 0**: CA bundles mirrored into CA-only Secrets + collector RBAC (Phase 4.5) |
 | Remote rule evaluation changes alert timing | alert semantics drift | Review affected rules for semantics drift before enabling GMP rules |
-| Maintaining GMP API definitions | copied API/schema drift | Pinned source, checksums, reproducible extraction/deepcopies and schema/serialization tests; review source/schema updates deliberately |
+| Maintaining GMP API definitions | copied API/schema drift | GCP HCP ownership and gcp-reviewers review; source pin in `hack/gmp-api-source/go.mod`; generated provenance and reproducible sync/CI verification; canonical HyperShift runbook and deliberate compatibility review. Candidate-update detection remains open. |
+| Source snapshot differs from deployed GMP | API fields rejected or behave differently | Record GKE version, GMP operator image and deployed-schema/live compatibility evidence; do not infer support from matching version numbers or offline fixtures. |
 | Manifest duplication drift (CoreOS target added without GMP coverage) | Target silently unscraped under GMP | Coverage-based parity test (Phase 7) blocks CI |
 | Non-1:1 mapping mis-modeled (SM→pod selector narrows/widens target set; over-consolidation) | GMP scrapes a different target set than CoreOS | Per-target discovery audit (Phase 4); coverage test normalizes Service discovery to pod targets before comparing |
 | Inactive backend isolation | unintended decoding/API/status/watch operations | Additive registration is inert; resolve and test lifecycle selection before expanding assets |
@@ -278,10 +305,13 @@ The mapping is many-to-one (no ServiceMonitor kind; `ServiceMonitor`/`PodMonitor
 
 ## Definition of Done (this story)
 
+- [ ] API snapshot has a documented GCP HCP owner and gcp-reviewers routing, a pinned source module, generated provenance, reproducible `make gmp-sync` and non-writing `make verify-gmp-sync` enforced in CI for relevant changes; canonical maintenance instructions and focused checks are documented. Implemented and validated locally; merge remains pending.
+- [ ] Supported GKE/GMP environments and compatibility evidence are recorded, including GKE version, GMP operator image and the validation performed; offline schema checks are distinguished from live admission, scraping and rule evaluation.
 - [ ] `MONITORING_API_GROUP` honored by both binaries; default and `RHOBS_MONITORING=1` outputs unchanged (golden tests green).
 - [ ] RHOBS + GMP env-var combination is rejected with the specified error by every binary that consumes the selection — `hypershift install`/`render` and control-plane-operator startup today, and the hypershift-operator once it reads the selection for the NetworkPolicy (Phase 6).
 - [ ] Every CoreOS scrape target (all 11 SM + 8 PM at CPO level + the 2 endpoint-bearing management-level monitors) is covered by a GMP `PodMonitoring` endpoint and renders correctly — noting GMP resources may be fewer than CoreOS files due to SM/PM→PodMonitoring collapse and endpoint consolidation.
 - [ ] Rule resources (the CPO recording-rule `PrometheusRule` + the 2 management-level recording/alerting rules) have matching GMP rule resources at the required namespace/cluster/global scope and are verified **separately** from scrape-target coverage.
+- [ ] CPO writer permissions and the HyperShift operator's authority to grant them cover the selected GMP resources; authorization and backend-transition tests prove grants precede creation and owned-resource cleanup precedes revocation, with unchanged default/RHOBS steady-state policies.
 - [ ] etcd and kube-apiserver GMP monitors preserve TLS/auth and are validated (Phase 0 evidence attached).
 - [ ] MetricSet (Telemetry/SRE/All) semantics preserved via the translation layer; no duplicated allow/drop lists.
 - [ ] CA-only Secrets and the collector Role/RoleBinding are emitted (GMP-gated), owner-referenced to the HCP, and absent on the default path.
