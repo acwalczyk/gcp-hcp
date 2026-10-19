@@ -154,7 +154,7 @@ A completed scan exits successfully whether its assessment result is `Passed` or
 
 ## Why the scripts are Bash
 
-The Bash scripts are small local wrappers around `gcloud`, `jq`, `oras`, `complypack`, and `complyctl`; the live check does not invent GCP observations. They make it easier to learn and repeat this prototype, but they are not a decision that production collection should be Bash. This repository's [pipeline automation decision](../../design-decisions/automation/pipeline-automation-tooling.md) selects Tekton for general scheduled, event-driven, or on-demand platform workflows. This experiment does not yet define or deploy that automation.
+The Bash scripts are small local wrappers around `gcloud`, `jq`, `oras`, `complypack`, and `complyctl`; the live check does not invent GCP observations. They make it easier to learn and repeat this prototype, but they are not a decision that production collection should be Bash. The repository's [pipeline automation decision](../../design-decisions/automation/pipeline-automation-tooling.md) selected Tekton for general scheduled, event-driven, or on-demand platform workflows, but the platform has since moved away from Tekton and no replacement has been chosen for this class of workflow. A SPIKE is needed to pick the tool that runs scheduled compliance scans before this prototype becomes real automation. This experiment does not define or deploy that automation.
 
 ## Useful references
 

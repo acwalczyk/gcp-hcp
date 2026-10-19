@@ -102,7 +102,7 @@ The fast policy-only suites remain directly runnable as `bash tests/run-fixtures
 
 ## Why this first version uses Bash
 
-The Bash scripts are small learning glue around real `gcloud` API reads and the native ComplyTime CLI; they do not manufacture live assessment data. `jq` reshapes the API responses, and the same Gemara policy, CompliPack, and provider path is used for fixture and live input. The wrapper is not a decision that production collection should be Bash. This local experiment does not define a scheduled automation pipeline; the repository's [pipeline automation decision](../../../../design-decisions/automation/pipeline-automation-tooling.md) selects Tekton for platform workflows.
+The Bash scripts are small learning glue around real `gcloud` API reads and the native ComplyTime CLI; they do not manufacture live assessment data. `jq` reshapes the API responses, and the same Gemara policy, CompliPack, and provider path is used for fixture and live input. The wrapper is not a decision that production collection should be Bash. This local experiment does not define a scheduled automation pipeline. The repository's [pipeline automation decision](../../../../design-decisions/automation/pipeline-automation-tooling.md) selected Tekton for platform workflows, but the platform has since moved away from Tekton, so a SPIKE is needed to determine which tool runs these automations.
 
 ## Scope boundaries
 
