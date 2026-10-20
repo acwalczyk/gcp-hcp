@@ -35,19 +35,21 @@ The GCP project has 8 automation rules that manage Team field population:
 
 ### Rules 4-5: Cascade Team from Parent
 
-**Purpose:** Automatically inherit Team field from parent issue to child issues.
+**Purpose:** Automatically inherit Team field from parent issue to child issues when the child is created or updated.
 
-**Trigger:** Work item updated
+**Trigger:** Work item updated (the child issue)
 
 **Conditions:**
-- For Rule 4: Issue Type equals Epic AND Parent matches JQL "Team is not EMPTY"
-- For Rule 5: Issue Type is one of (Story, Task, Bug, Spike) AND Parent matches JQL "Team is not EMPTY"
+- For Rule 4: Issue Type equals Epic AND Parent matches JQL "Team is not EMPTY" AND Team is EMPTY
+- For Rule 5: Issue Type is one of (Story, Task, Bug, Spike) AND Parent matches JQL "Team is not EMPTY" AND Team is EMPTY
 
 **Action:** Copy Team from parent work item
 
 **Rule details:**
-- **Rule 4:** Epic inherits Team from parent Feature or Initiative
-- **Rule 5:** Story/Task/Bug/Spike inherits Team from parent Epic
+- **Rule 4:** Epic inherits Team from parent Feature or Initiative (when Epic is created/updated and Epic's Team is empty)
+- **Rule 5:** Story/Task/Bug/Spike inherits Team from parent Epic (when child is created/updated and child's Team is empty)
+
+**Note:** These rules trigger when the **child** issue is created or updated, not when the parent's Team value changes. If you change a parent's Team value, existing children will not be updated automatically.
 
 ### Rules 6-8: Auto-assign Team to Orphaned Items
 
@@ -57,19 +59,20 @@ The GCP project has 8 automation rules that manage Team field population:
 
 **Conditions:**
 1. Issue Type is one of: Story, Task, Bug, Spike, Epic
-2. Assignee is one of: [pod members]
-3. Team is EMPTY
+2. Parent does not exist
+3. Assignee is one of: [pod members]
+4. Team is EMPTY
 
 **Action:** Set Team field to the appropriate pod (Pod A, Pod B, or Pod C)
 
 **Rule details:**
-- **Rule 6:** Pod A members → Team = Pod A
-- **Rule 7:** Pod B members → Team = Pod B
-- **Rule 8:** Pod C members → Team = Pod C
+- **Rule 6:** Pod A members → Team = Pod A (if no parent and Team empty)
+- **Rule 7:** Pod B members → Team = Pod B (if no parent and Team empty)
+- **Rule 8:** Pod C members → Team = Pod C (if no parent and Team empty)
 
 ## Team is EMPTY Safeguard
 
-All assignee-based rules (Rules 1-3, 6-8) include a "Team is EMPTY" condition. This means:
+All automation rules (Rules 1-8) include a "Team is EMPTY" condition. This means:
 
 - Automation only runs when the Team field is not already set
 - Manual Team assignments are never overwritten by automation
@@ -163,7 +166,7 @@ The automation will not overwrite your manual assignment thanks to the "Team is 
 **Solutions:**
 - Manually set the Team field to the correct pod (your change will stick)
 - Consider whether the parent Feature/Initiative Team field needs updating
-- Remember: child issues inherit from parent, so changing the parent cascades down
+- Note: Changing a parent's Team does NOT automatically cascade to existing children; children only inherit when they are created or updated
 
 ### Item assigned but Team field still empty
 
@@ -201,17 +204,17 @@ This identifies items actively being worked on that are missing Team assignment.
 
 **Pod A:**
 ```
-project = GCP AND type in (Story, Task, Bug, Spike, Epic) AND assignee IN (557058:f58d285f-ca16-4196-98ae-c8576387a7a8, 712020:05660a16-5e3f-4d3e-bd7e-b8f0bc0ab8ca, 712020:53e74065-a06d-48da-91ec-95dd01f59f18, 712020:b2c7df9f-43dd-4999-a8a7-d1bbb73c1b85) AND Team is EMPTY AND resolution = Unresolved
+project = GCP AND type in (Story, Task, Bug, Spike, Epic) AND parent is EMPTY AND assignee IN (557058:f58d285f-ca16-4196-98ae-c8576387a7a8, 712020:05660a16-5e3f-4d3e-bd7e-b8f0bc0ab8ca, 712020:53e74065-a06d-48da-91ec-95dd01f59f18, 712020:b2c7df9f-43dd-4999-a8a7-d1bbb73c1b85) AND Team is EMPTY AND resolution = Unresolved
 ```
 
 **Pod B:**
 ```
-project = GCP AND type in (Story, Task, Bug, Spike, Epic) AND assignee IN (71e7cb8b-69d6-4f1a-bc99-c0dd159b44cd, 712020:cb8b470b-78d3-4bb3-87e7-e0303090dd22, 712020:e08ab655-a58a-44ba-a6f9-ce604be36de3, 712020:8fe92d81-e996-45c1-bfc8-c40af89ddd05) AND Team is EMPTY AND resolution = Unresolved
+project = GCP AND type in (Story, Task, Bug, Spike, Epic) AND parent is EMPTY AND assignee IN (71e7cb8b-69d6-4f1a-bc99-c0dd159b44cd, 712020:cb8b470b-78d3-4bb3-87e7-e0303090dd22, 712020:e08ab655-a58a-44ba-a6f9-ce604be36de3, 712020:8fe92d81-e996-45c1-bfc8-c40af89ddd05) AND Team is EMPTY AND resolution = Unresolved
 ```
 
 **Pod C:**
 ```
-project = GCP AND type in (Story, Task, Bug, Spike, Epic) AND assignee IN (5c23e222b92be60d8040734f, 63d898f889bf35bcc8cf08ea, 712020:adf0b2e3-0ac6-40aa-a97a-a4c4f7cc2656, 712020:19a8c82b-ec27-404c-877e-3ef8f06cd756) AND Team is EMPTY AND resolution = Unresolved
+project = GCP AND type in (Story, Task, Bug, Spike, Epic) AND parent is EMPTY AND assignee IN (5c23e222b92be60d8040734f, 63d898f889bf35bcc8cf08ea, 712020:adf0b2e3-0ac6-40aa-a97a-a4c4f7cc2656, 712020:19a8c82b-ec27-404c-877e-3ef8f06cd756) AND Team is EMPTY AND resolution = Unresolved
 ```
 
 ### View all work for a specific pod
