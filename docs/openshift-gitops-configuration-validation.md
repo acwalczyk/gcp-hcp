@@ -149,12 +149,32 @@ method, source/image provenance and limitations. Arrange approved team evidence
 retention before retiring trial branches/images; never publish Secret values,
 tokens, browser cookies or raw credential-bearing configuration.
 
+## Subsequent authentication validation — October 21–23
+
+Separate GCP-1283 checks subsequently validated the established HCP IAP/Dex flow
+on the existing disposable operator-managed region and MC: organizational login
+and identity, existing admin/read-only permissions, actual permitted Application
+reads and denied creates, logout/re-login, and fresh login after separately
+approved same-image Dex replacements. The
+[dated authentication record](https://github.com/openshift-online/gcp-hcp-infra/blob/0a523f7fc9bb480e91ea608e3dfe358ef380be1f/docs/ARGOCD_IAP_VALIDATION.md)
+in [gcp-hcp-infra PR #2439](https://github.com/openshift-online/gcp-hcp-infra/pull/2439)
+retains source/image pins, user-report/screenshot distinctions and security limits.
+
+These later results are not part of the October 13 configuration-ownership trials
+or proof of the newly proposed legacy-controller scale-to-zero/takeover sequence.
+They preserve the existing flow rather than selecting a new authentication design.
+The record identifies the pre-existing C4 hardening concern without claiming its
+remediation or a passing signed-IAP/direct-backend negative. Actual GitHub
+notification delivery remains a separate GCP-1284 acceptance gate.
+
 ## Explicit boundaries
 
-No organizational IAP browser login, actual GitHub status delivery, workload-cloud
-identity, official artifact/trust certification, optional-component workflow,
-production rollout or whole-cluster rebuild was proven here. Those remain the
-separate GCP-1280 and GCP-1283–1289 adoption gates.
+The October 13 configuration-ownership trials did not prove organizational IAP
+browser login, actual GitHub status delivery, workload-cloud identity, official
+artifact/trust certification, optional-component workflow, production rollout or
+whole-cluster rebuild. The later GCP-1283 authentication results are separately
+attributed above. The linked GCP-1280 and GCP-1283–1289 stories govern their
+respective adoption gates; this record does not mark them all complete.
 
 The retired trial seeds cannot independently cold-start Argo CD after a cluster
 rebuild. A separately reviewed protected-seed/reclaim and exact-spec recovery

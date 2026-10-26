@@ -15,6 +15,15 @@ chart revisions before proposing a live transition. The existing
 `bootstrap/kustomization.yaml` does not reference these opt-in components;
 ordinary bootstrap output is unchanged.
 
+**Authentication follow-up, October 21–23:** GCP-1283 subsequently validated the
+existing HCP IAP/Dex flow on both disposable operator-managed targets, including
+identity, representative RBAC and logout/re-login. See the
+[dated authentication record](https://github.com/openshift-online/gcp-hcp-infra/blob/0a523f7fc9bb480e91ea608e3dfe358ef380be1f/docs/ARGOCD_IAP_VALIDATION.md)
+in [gcp-hcp-infra PR #2439](https://github.com/openshift-online/gcp-hcp-infra/pull/2439).
+These results support readiness for the tested existing instances; they do not
+demonstrate the legacy scale-to-zero/takeover sequence below or actual GitHub
+notification delivery, and do not certify a new target or release artifact.
+
 ## Installation method: no OLM
 
 **OLM is not used at either layer.** The proposed installation path is:
@@ -52,10 +61,11 @@ down the old runtime does not by itself transfer those ownership relationships.
 ### Readiness and identity
 
 Inventory the old and new controllers, sources, resource identities, annotations,
-owners and finalizers. Pin compatible operator/CRDs and complete per-target CR
-settings, repository access, external credential delivery and bootstrap/recovery
-inputs. The private chart cannot bootstrap itself without a running Argo instance;
-the replacement must not depend on the old runtime remaining active.
+owners and finalizers. Pin compatible operator and CRD versions and complete
+per-target CR settings, repository access, external credential delivery and
+bootstrap/recovery inputs. The private chart cannot bootstrap itself without a
+running Argo instance; the replacement must not depend on the old runtime remaining
+active.
 Identify the independent bootstrap/recovery executor in the target plan. Complete
 any protection or source changes that require the old Argo before stopping it;
 remaining steps need an independent executor, not a now-inactive Argo Application.
@@ -64,9 +74,11 @@ request automatic pruning, so a check after the new controller starts is too lat
 
 Keep forward configuration backwards compatible with existing/unmigrated
 non-operator targets. Test both chart modes and the existing Argo e2e path; its disabled
-IAP/Dex settings do not prove organizational login. Actual IAP login and GitHub
-notification delivery remain separate readiness gates, not consequences of a
-successful configuration render or Synced status.
+IAP/Dex settings do not prove organizational login. Per-target IAP login and actual
+GitHub notification delivery remain required readiness checks, not consequences
+of a successful configuration render or Synced status. The dated GCP-1283 follow-up
+above supplies authentication evidence for the existing tested instances only;
+actual notification delivery remains a separate GCP-1284 acceptance gate.
 
 The meeting requirement for the "same identifier" needs explicit preflight checks:
 capture the tracking method, any installation identifier, application identities
@@ -179,9 +191,13 @@ After each separately approved source stage, verify fetched revision, RootSync
 Sync Completed/no errors, live annotations and original seed UIDs. Config Sync
 does not leave `managed: disabled` on the live object; confirm its **management
 metadata and inventory entry are removed**, not the presence of that value.
-Then follow the private chart's protect/adopt/ConfigMap tracking-retirement
-procedure. Argo prune protection and obsolete tracking cleanup are separate
-from Config Sync release, and must not be skipped.
+Private-chart CM protection, including the mutation-ignore bridge below, must
+already have been observed before public release. The order is **private CM
+protection → public seed protection → observed public release → private CR
+adoption → guarded ConfigMap tracking retirement**. After release, proceed with
+adoption and tracking retirement in the private chart's procedure; protection is
+not a post-release step. Argo prune protection and obsolete tracking cleanup are
+separate from Config Sync release and must not be skipped.
 
 An existing `client.lifecycle.config.k8s.io/mutation: ignore` on argocd-cm can
 cause Config Sync to skip an ordinary detach-annotation update. The private
@@ -230,6 +246,7 @@ operator-managed instances**. They do not demonstrate the complete old non-opera
 Argo scale-to-zero → operator-managed takeover sequence, deleting/recreating Argo,
 or rebuilding the cluster. These are bounded, dated observations; the agreed runtime
 cutover needs its own target-specific evidence. Existing engineering
-artifacts are not a certified supported release. Configuration preservation does
-not establish authenticated IAP login, real GitHub delivery or complete rebuild
-recovery. Team PR review/merge and applicable DoD remain separate from trial proof.
+artifacts are not a certified supported release. Configuration preservation alone
+does not establish authenticated IAP login, real GitHub delivery or complete rebuild
+recovery; the later GCP-1283 authentication evidence is separately attributed above.
+Team PR review/merge and applicable DoD remain separate from trial proof.

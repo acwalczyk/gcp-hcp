@@ -35,6 +35,15 @@ scale-down and replacement sequence, organizational login, or actual notificatio
 delivery. Historical seed-handoff tooling supports that ownership work where
 needed; it is not an alternative rollout direction or a complete replacement tool.
 
+**Subsequent authentication evidence, October 21–23:** GCP-1283 validated the
+established HCP IAP/Dex flow on the existing disposable operator-managed MC and
+region, including identity, representative RBAC and logout/re-login checks. See
+the [dated authentication validation record](https://github.com/openshift-online/gcp-hcp-infra/blob/0a523f7fc9bb480e91ea608e3dfe358ef380be1f/docs/ARGOCD_IAP_VALIDATION.md),
+published in [gcp-hcp-infra PR #2439](https://github.com/openshift-online/gcp-hcp-infra/pull/2439).
+This is additional evidence, not a change to the October 13 trial scope or proof
+of the full legacy-runtime cutover, actual notification delivery or release
+qualification.
+
 ## Context
 
 - **Problem:** GCP-1226 found operator reconciliation overwrote required HCP
@@ -145,8 +154,12 @@ Bootstrap/recovery must work without depending on the old Argo being active.
 ### Security
 
 - Preserve HTTPS/Gateway/IAP, Dex/RBAC configuration and disabled admin/anonymous
-  access; never add a local-user fallback. Actual organizational authentication
-  and signed-identity trust-boundary verification remain GCP-1283 acceptance.
+  access; never add a local-user fallback. GCP-1283's subsequent authentication
+  evidence covers the established flow on the tested operator instances, not
+  every future cutover target or signed-identity hardening. Its record distinguishes
+  the pre-existing C4 concern from an operator regression and does not mark the
+  stronger signed-IAP/direct-backend criterion passed. No replacement authentication
+  design is selected by this configuration decision.
 - Credential values stay outside Git/logs/evidence. Configuration preservation
   is not proof of GitHub delivery or workload cloud identity (GCP-1284/GCP-1285).
 - Chart tuning cannot override chart-owned auth settings, bypass the approved
