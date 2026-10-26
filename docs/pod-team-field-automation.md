@@ -36,7 +36,7 @@ The GCP project has 8 automation rules that manage Team field population:
 
 **Purpose:** Automatically inherit Team field from parent issue to child issues when the child is created or updated.
 
-**Trigger:** Work item updated (the child issue)
+**Trigger:** Work item created or updated (the child issue)
 
 **Conditions:**
 - For Rule 4: Issue Type equals Epic AND Parent matches JQL "Team is not EMPTY" AND Team is EMPTY
