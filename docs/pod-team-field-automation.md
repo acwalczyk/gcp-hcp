@@ -6,10 +6,9 @@ This document describes the Jira automation rules that manage the Team custom fi
 
 The GCP HCP team is organized into three pods (A, B, C). Work is automatically organized by pod using the Team custom field, which determines which items appear on each pod's board when using Quick Filters.
 
-**Pod membership:**
-- **Pod A:** Amador Pahim, Cristiano Veiga, Grzegorz Barabasz, Chaitanya Kandagatla
-- **Pod B:** Priya Vasanthakumar, Daniel Rejniak, Nico Schieder, Christoph Blecker
-- **Pod C:** Patrick Martin, Jim DAgostino, Drew Walczyk, Roger Flores
+**Pod membership:** See the [Team Ceremonies Calendar](https://redhat.atlassian.net/wiki/spaces/GCP/pages/424214835/Team+Ceremonies+Calendar) in Confluence for current pod assignments.
+
+> **Note:** Pod membership is maintained in Confluence as the single source of truth. This ensures accuracy as team members join, leave, or change pods.
 
 ## Automation Rules
 
@@ -201,6 +200,8 @@ project = GCP AND Team is EMPTY AND resolution = Unresolved AND status IN ("In P
 This identifies items actively being worked on that are missing Team assignment.
 
 ### Find orphaned items for a specific pod
+
+> **Maintenance note:** These queries include Jira account IDs for pod members. When pod membership changes, update the account IDs to match the current membership listed in the [Team Ceremonies Calendar](https://redhat.atlassian.net/wiki/spaces/GCP/pages/424214835/Team+Ceremonies+Calendar).
 
 **Pod A:**
 ```
